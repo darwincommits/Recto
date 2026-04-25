@@ -131,9 +131,9 @@ class TestMetadata:
         assert any("metadata.name" in p for p in exc_info.value.problems)
 
     def test_name_with_underscore_and_hyphen_ok(self) -> None:
-        ok = {**MINIMAL_VALID, "metadata": {"name": "all-thruit_web"}}
+        ok = {**MINIMAL_VALID, "metadata": {"name": "my-service_web"}}
         c = load_config(ok)
-        assert c.metadata.name == "all-thruit_web"
+        assert c.metadata.name == "my-service_web"
 
 
 class TestSpec:

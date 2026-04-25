@@ -267,16 +267,16 @@ class TestListNames:
         # Three different services in the same store.
         store.write("recto:myservice:MY_API_KEY", "v")
         store.write("recto:myservice:WEBHOOK_TOKEN", "v")
-        store.write("recto:allthruit:ANTHROPIC_KEY", "v")
-        store.write("recto:other:UNRELATED", "v")
+        store.write("recto:otherservice:ANTHROPIC_KEY", "v")
+        store.write("recto:third:UNRELATED", "v")
         # Plus a non-Recto entry to make sure we filter.
         store.write("Microsoft_OC1:foo", "v")
 
         svc = FakeCredManSource("myservice", store)
         assert svc.list_names() == ["MY_API_KEY", "WEBHOOK_TOKEN"]
 
-        allthruit = FakeCredManSource("allthruit", store)
-        assert allthruit.list_names() == ["ANTHROPIC_KEY"]
+        other = FakeCredManSource("otherservice", store)
+        assert other.list_names() == ["ANTHROPIC_KEY"]
 
         unknown = FakeCredManSource("nonexistent", store)
         assert unknown.list_names() == []

@@ -1,4 +1,4 @@
-﻿"""Webhook event dispatch for Recto launcher events.
+"""Webhook event dispatch for Recto launcher events.
 
 When the supervised child crashes, the healthz probe detects deadlock,
 or the restart policy gives up, recto.comms posts a structured JSON

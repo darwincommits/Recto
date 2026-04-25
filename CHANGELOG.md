@@ -7,6 +7,19 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — v0.2.1 cleanup
+- `recto/comms.py` no longer carries a leading UTF-8 BOM. Python's
+  import machinery handled the BOM transparently, but `compile()`
+  from a string and various tooling chokes on it. Three-byte fix,
+  no behavior change. Surfaced during the v0.2 coverage-audit
+  compile sweep.
+- `tests/test_secrets_credman.py::TestListNames::test_lists_only_this_service`
+  and `tests/test_config.py::TestMetadata::test_name_with_underscore_and_hyphen_ok`
+  no longer use operator-environment-specific service names as
+  fixture data. Replaced with generic placeholders (`otherservice`,
+  `my-service_web`). Test semantics identical; fixture names no
+  longer leak operator context into the public OSS tree.
+
 ### Added — v0.2 coverage (pytest-cov >80% gate)
 - `[tool.coverage.run]` and `[tool.coverage.report]` sections in
   `pyproject.toml`. `source = ["recto"]`; `omit` covers the

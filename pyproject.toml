@@ -39,9 +39,9 @@ keychain = []  # macOS uses /usr/bin/security CLI (stdlib only)
 secret-service = ["secretstorage>=3.3"]
 
 [project.urls]
-Homepage = "https://github.com/erikcheatham/Recto"
-Repository = "https://github.com/erikcheatham/Recto"
-Issues = "https://github.com/erikcheatham/Recto/issues"
+Homepage = "https://github.com/darwincommits/Recto"
+Repository = "https://github.com/darwincommits/Recto"
+Issues = "https://github.com/darwincommits/Recto/issues"
 
 [project.scripts]
 recto = "recto.cli:main"

@@ -7,6 +7,36 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2.1 docs (operator runbook + sample YAML)
+- `examples/sample.service.yaml` — minimal-but-realistic
+  service.yaml demonstrating every `spec` section: secrets,
+  env, healthz (with tcp + exec variants commented), restart
+  policy, comms webhooks with template-interpolated headers,
+  resource_limits, admin_ui, and the opt-in telemetry block.
+  Generic placeholder names (`myservice`, `MY_API_KEY`,
+  `hooks.example.com`) so it works as a copy-paste reference for
+  any consumer service. Validates clean against `load_config`.
+- `docs/install.md` — quick install guide. Requirements, `pip
+  install recto` (with `[otel]` extra notes), version verify, and
+  a 30-second smoke recipe that exercises the launcher + admin UI
+  without needing NSSM or Credential Manager.
+- `docs/upgrade-from-nssm.md` — operator runbook for migrating an
+  existing NSSM-wrapped service to Recto. Nine-step flow:
+  backup -> stop -> dry-run -> apply migration -> verify
+  CredMan -> hand-edit YAML for healthz/comms/admin_ui ->
+  `recto apply` reconcile -> start -> verify. Plus failure
+  modes, rollback via `reg import`, and what doesn't migrate
+  automatically (`AppExit`, `AppRestartDelay`, `AppRotate*`,
+  service-dependency chains).
+- `docs/integration-gaps.md` — internal memo flagging four small
+  Recto-side improvements that would smooth the first-consumer
+  migration: non-secret env handling in `migrate-from-nssm`, a
+  documented "receive Recto events" convention for consumer
+  services, richer fields in the admin UI's `/api/status`
+  payload, and a `recto events <service>` CLI dump for incident
+  response when the admin UI is down. None block the first
+  migration; all are <50 lines each.
+
 ### Fixed — v0.2.1 cleanup
 - `recto/comms.py` no longer carries a leading UTF-8 BOM. Python's
   import machinery handled the BOM transparently, but `compile()`

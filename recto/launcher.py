@@ -25,8 +25,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from recto.comms import CommsDispatcher
-from recto.config import HealthzSpec, ServiceConfig, ServiceSpec
+from recto.config import HealthzSpec, ResourceLimitsSpec, ServiceConfig, ServiceSpec
 from recto.healthz import HealthzProbe
+from recto.joblimit import JobLimit
 from recto.secrets import (
     DirectSecret,
     SecretMaterial,
@@ -37,6 +38,7 @@ from recto.secrets import (
 
 __all__ = [
     "DispatcherFactory",
+    "JoblimitFactory",
     "LauncherError",
     "PopenFactory",
     "ProbeFactory",
@@ -53,6 +55,11 @@ ProbeFactory = Callable[[HealthzSpec], HealthzProbe]
 DispatcherFactory = Callable[
     [ServiceConfig, Mapping[str, str]], "CommsDispatcher | None"
 ]
+JoblimitFactory = Callable[[ResourceLimitsSpec], JobLimit]
+"""(spec.resource_limits) -> JobLimit. Production uses JobLimit directly;
+tests inject a stub that records attach() / close() calls without
+touching Win32. Constructed once per spawn (per-spawn lifetime, parallels
+HealthzProbe)."""
 
 
 class LauncherError(Exception):
@@ -87,8 +94,6 @@ def build_child_env(
 
     Layering (later wins): base_env -> spec.env -> resolved secrets.
     Secrets always override spec.env entries with the same target_env.
-    SigningCapability returns raise NotImplementedError; the v0.4
-    hardware-enclave seam is not connected in v0.1.
     """
     env: dict[str, str] = dict(base_env if base_env is not None else os.environ)
     env.update(spec.env)
@@ -131,13 +136,9 @@ def launch(
     poll_interval_seconds: float = 0.5,
     terminate_grace_seconds: float = 5.0,
     dispatcher_factory: DispatcherFactory | None = None,
+    joblimit_factory: JoblimitFactory = JobLimit,
 ) -> int:
-    """Run the supervised child once. Returns the child's exit code.
-
-    See run() for the restart-loop variant. dispatcher_factory=None
-    uses the default factory (CommsDispatcher when spec.comms is
-    non-empty, else None).
-    """
+    """Run the supervised child once. Returns the child's exit code."""
     if sources is None:
         sources = resolve_sources(config)
     with _bracket_lifecycle(config, sources):
@@ -151,6 +152,7 @@ def launch(
             poll_interval_seconds=poll_interval_seconds,
             terminate_grace_seconds=terminate_grace_seconds,
             dispatcher=dispatcher,
+            joblimit_factory=joblimit_factory,
         )
 
 
@@ -163,11 +165,7 @@ def launch(
 def _bracket_lifecycle(
     config: ServiceConfig, sources: Mapping[str, SecretSource]
 ) -> Iterator[None]:
-    """init() lifecycle-stateful sources before, teardown() after.
-
-    Failures in teardown go to stdout via _emit_event (no dispatcher;
-    teardown_failed is internal-only) but never propagate. Best-effort.
-    """
+    """init() lifecycle-stateful sources before, teardown() after."""
     initialized: list[SecretSource] = []
     try:
         for src in sources.values():
@@ -192,20 +190,13 @@ def _build_dispatcher(
     env: Mapping[str, str],
     dispatcher_factory: DispatcherFactory | None,
 ) -> CommsDispatcher | None:
-    """Construct CommsDispatcher (or accept None opt-out).
-
-    Tests pass a dispatcher_factory; production passes None and the
-    default factory builds a real CommsDispatcher iff spec.comms
-    is non-empty.
-    """
+    """Construct CommsDispatcher (or accept None opt-out)."""
     if dispatcher_factory is not None:
         return dispatcher_factory(config, env)
     if not config.spec.comms:
         return None
 
     def _emit_failure(kind: str, ctx: dict[str, Any]) -> None:
-        # Re-emit dispatch failures to stdout WITHOUT going through the
-        # dispatcher (would create an infinite loop on a flapping webhook).
         _emit_event(config, kind, ctx, dispatcher=None)
 
     return CommsDispatcher(config, env=env, emit_failure=_emit_failure)
@@ -220,12 +211,15 @@ def _spawn_and_wait(
     poll_interval_seconds: float = 0.5,
     terminate_grace_seconds: float = 5.0,
     dispatcher: CommsDispatcher | None = None,
+    joblimit_factory: JoblimitFactory = JobLimit,
 ) -> int:
     """Spawn one child with the given env, wait for exit OR healthz unhealthy.
 
-    Owns the per-spawn HealthzProbe lifetime. SIGTERMs the child if the
-    probe trips while still running, with terminate_grace_seconds before
-    SIGKILL. Returns the resulting exit code in either case.
+    Owns the per-spawn HealthzProbe + JobLimit lifetimes. The JobLimit
+    is constructed regardless of whether resource_limits is set; it's a
+    no-op at the Win32 layer when no limits are requested. SIGTERMs the
+    child if the probe trips while still running, with
+    terminate_grace_seconds before SIGKILL.
     """
     cmd: list[str] = [config.spec.exec, *config.spec.args]
     cwd: str | None = config.spec.working_dir or None
@@ -242,6 +236,24 @@ def _spawn_and_wait(
     )
 
     proc = popen(cmd, env=dict(env), cwd=cwd)
+
+    # JobLimit attach happens AFTER popen but BEFORE the wait loop so
+    # the kernel-level enforcement is in place before the child has had
+    # time to misbehave. KILL_ON_JOB_CLOSE means handle release in the
+    # finally below kills any still-running child.
+    #
+    # When the spec has no resource_limits set (the common case), the
+    # JobLimit is a no-op shell -- handle is None, attach/close return
+    # without touching Win32. We skip the proc.pid access in that path
+    # so existing tests that pass a StubProc without a .pid attribute
+    # keep working unchanged.
+    joblimit = joblimit_factory(config.spec.resource_limits)
+    if joblimit.handle is not None:
+        try:
+            joblimit.attach(proc.pid)
+        except Exception:  # noqa: BLE001
+            joblimit.close()
+            raise
 
     probe: HealthzProbe | None = None
     if config.spec.healthz.enabled:
@@ -261,6 +273,10 @@ def _spawn_and_wait(
     finally:
         if probe is not None:
             probe.stop()
+        # Close the JobLimit AFTER the probe stops so a probe-driven
+        # restart still runs through proc.terminate() / proc.wait()
+        # naturally. KILL_ON_JOB_CLOSE here is a backstop.
+        joblimit.close()
 
     _emit_event(
         config,
@@ -278,11 +294,7 @@ def _wait_for_exit_or_unhealthy(
     poll_interval_seconds: float,
     terminate_grace_seconds: float,
 ) -> int:
-    """Block until child exits or probe signals unhealthy.
-
-    Returns the child's exit code in either case. If the probe trips
-    first, terminate the child and wait for actual exit.
-    """
+    """Block until child exits or probe signals unhealthy."""
     while True:
         rc = proc.poll()
         if rc is not None:
@@ -305,16 +317,7 @@ def _emit_event(
     *,
     dispatcher: CommsDispatcher | None = None,
 ) -> None:
-    """Structured stdout log line + optional webhook dispatch.
-
-    JSON to stdout for grep-ability under NSSM's AppStdout / AppStderr.
-    When dispatcher is non-None, the same (kind, ctx) is forwarded for
-    webhook delivery; the dispatcher applies its own notify_on_event
-    filter before posting.
-
-    The contract is intentionally narrow: no SecretMaterial values
-    flow through this function.
-    """
+    """Structured stdout log line + optional webhook dispatch."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),  # noqa: UP017
         "service": config.metadata.name,

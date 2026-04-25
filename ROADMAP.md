@@ -36,7 +36,7 @@ Original timeframes (April-May 2026 → late-2026/2027) were drafted before AI-a
 **Scope:**
 - Web admin UI at `127.0.0.1:5050`, exposed via Cloudflare Tunnel (or any reverse proxy you bring), gated by Cloudflare Access or your auth layer of choice. Tabs: Status, Logs (live tail), Secrets (names only, masked values, rotate button), Config (read-only YAML render), Restart History.
 - GitOps reconcile. `recto apply <yaml>` reads the YAML and reconciles NSSM state to match. Replaces imperative PowerShell. Diff-and-confirm before applying. **Shipped.** Reconciles AppPath, AppParameters, AppDirectory, DisplayName, Description, and clears AppEnvironmentExtra. `--dry-run` for plan-only; `--yes` to skip the confirm prompt.
-- Win32 Job Object resource limits. `recto.joblimit` wraps the child in a Job Object enforcing the YAML-declared `resource_limits`.
+- Win32 Job Object resource limits. `recto.joblimit` wraps the child in a Job Object enforcing the YAML-declared `resource_limits`. **Shipped.** Enforces `memory_mb` (per-process commit cap), `cpu_percent` (CpuRate hard cap), and `process_count` (ActiveProcessLimit), plus an always-on `KILL_ON_JOB_CLOSE` so the supervised child dies with the launcher.
 - OpenTelemetry traces for every lifecycle event. Sink to a configurable OTLP endpoint or no-op if undeclared.
 - TCP and exec-based health checks alongside the HTTP variant. **Shipped.** `spec.healthz.type: tcp` and `type: exec` work end-to-end with type-aware schema validation; default implementations dispatched from `_default_check_for_spec`.
 - `pytest-cov` >80% on the launcher critical path.

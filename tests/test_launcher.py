@@ -1048,3 +1048,210 @@ class TestHealthzWiring:
         events = [json.loads(line) for line in out.strip().splitlines() if line.strip()]
         exit_event = next(e for e in events if e["kind"] == "child.exit")
         assert exit_event["ctx"]["healthz_signaled"] is False
+
+
+# ---------------------------------------------------------------------------
+# JobLimit integration (v0.2)
+# ---------------------------------------------------------------------------
+
+
+class _StubProcWithPid:
+    """Same as StubProc but exposes .pid for joblimit.attach()."""
+
+    def __init__(self, pid: int = 12345, returncode: int = 0) -> None:
+        self.pid = pid
+        self._returncode = returncode
+
+    def poll(self) -> int | None:
+        return self._returncode
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        return self._returncode
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+class _RecordingJobLimit:
+    """Drop-in JobLimit replacement that records every call.
+
+    Mirrors the FakeJobLimit pattern from tests/test_joblimit.py but
+    here we use a separate class because we want to inject via the
+    factory (not subclass JobLimit -- the launcher only sees the
+    duck-typed surface, no isinstance check).
+    """
+
+    def __init__(self, spec: ResourceLimitsSpec) -> None:
+        self.spec = spec
+        self.attach_calls: list[int] = []
+        self.close_calls = 0
+        # When the spec has any limit, simulate a real handle so the
+        # launcher's `if joblimit.handle is not None` path takes attach.
+        has_limit = (
+            spec.memory_mb is not None
+            or spec.cpu_percent is not None
+            or spec.process_count is not None
+        )
+        self.handle: int | None = 999 if has_limit else None
+
+    def attach(self, pid: int) -> None:
+        self.attach_calls.append(pid)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.handle = None
+
+
+def _make_config_with_limits(
+    *,
+    memory_mb: int | None = None,
+    cpu_percent: int | None = None,
+    process_count: int | None = None,
+) -> ServiceConfig:
+    """Build a ServiceConfig with the given resource_limits via load_config.
+
+    make_config() doesn't expose resource_limits, so for the JobLimit
+    integration tests we construct the dict directly. Limits land
+    inside spec.resource_limits exactly as load_config would parse them.
+    """
+    spec_resource_limits: dict[str, int] = {}
+    if memory_mb is not None:
+        spec_resource_limits["memory_mb"] = memory_mb
+    if cpu_percent is not None:
+        spec_resource_limits["cpu_percent"] = cpu_percent
+    if process_count is not None:
+        spec_resource_limits["process_count"] = process_count
+    return load_config(
+        {
+            "apiVersion": "recto/v1",
+            "kind": "Service",
+            "metadata": {"name": "myservice"},
+            "spec": {
+                "exec": "python.exe",
+                "resource_limits": spec_resource_limits,
+            },
+        }
+    )
+
+
+class TestJoblimitWiring:
+    def test_no_limits_does_not_attach(self) -> None:
+        """When spec.resource_limits has no fields set (default), the
+        launcher constructs a JobLimit but never calls attach()."""
+        config = make_config()  # default — no resource_limits
+        recorded: list[_RecordingJobLimit] = []
+
+        def factory(spec: ResourceLimitsSpec) -> _RecordingJobLimit:
+            jl = _RecordingJobLimit(spec)
+            recorded.append(jl)
+            return jl
+
+        popen_stub, _ = make_popen_stub(returncode=0)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            joblimit_factory=factory,
+        )
+        assert rc == 0
+        assert len(recorded) == 1
+        # No attach because handle is None (no limits).
+        assert recorded[0].attach_calls == []
+        # close() always runs in the finally block, even when handle is None.
+        assert recorded[0].close_calls == 1
+
+    def test_limits_set_attaches_pid_and_closes(self) -> None:
+        """When resource_limits is non-empty, launcher attaches the
+        child's pid to the JobLimit and closes after the wait loop."""
+        config = _make_config_with_limits(memory_mb=128, cpu_percent=50)
+        recorded: list[_RecordingJobLimit] = []
+
+        def factory(spec: ResourceLimitsSpec) -> _RecordingJobLimit:
+            jl = _RecordingJobLimit(spec)
+            recorded.append(jl)
+            return jl
+
+        # Custom popen that returns a Proc with a real pid attribute.
+        captured_proc_pid = 12345
+
+        def popen_stub(*_a, **_kw):
+            return _StubProcWithPid(pid=captured_proc_pid, returncode=0)
+
+        rc = launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            joblimit_factory=factory,
+        )
+        assert rc == 0
+        assert len(recorded) == 1
+        assert recorded[0].attach_calls == [captured_proc_pid]
+        assert recorded[0].close_calls == 1
+        # And the spec was passed through unchanged.
+        assert recorded[0].spec.memory_mb == 128
+        assert recorded[0].spec.cpu_percent == 50
+
+    def test_joblimit_close_runs_even_when_attach_succeeds(self) -> None:
+        """The finally block must close the JobLimit on the happy path
+        (KILL_ON_JOB_CLOSE is the kernel-level cleanup for the supervised
+        child; if we leak the handle, we leak the safety net)."""
+        config = _make_config_with_limits(process_count=8)
+        recorded: list[_RecordingJobLimit] = []
+
+        def factory(spec: ResourceLimitsSpec) -> _RecordingJobLimit:
+            jl = _RecordingJobLimit(spec)
+            recorded.append(jl)
+            return jl
+
+        def popen_stub(*_a, **_kw):
+            return _StubProcWithPid(pid=999, returncode=0)
+
+        launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            joblimit_factory=factory,
+        )
+        assert recorded[0].close_calls == 1
+
+    def test_attach_failure_closes_joblimit_and_propagates(self) -> None:
+        """If JobLimit.attach raises (e.g. Win32 hiccup or process
+        already gone), the launcher must close the JobLimit before
+        re-raising so the caller sees a clean failure rather than a
+        leaked handle."""
+        config = _make_config_with_limits(memory_mb=128)
+        recorded: list[object] = []
+
+        class _FailingJobLimit:
+            def __init__(self, spec: ResourceLimitsSpec) -> None:
+                self.spec = spec
+                self.handle = 42  # non-None so attach is reached
+                self.close_calls = 0
+                recorded.append(self)
+
+            def attach(self, _pid: int) -> None:
+                raise RuntimeError("Win32 hiccup")
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        def popen_stub(*_a, **_kw):
+            return _StubProcWithPid(pid=1)
+
+        with pytest.raises(RuntimeError, match="Win32 hiccup"):
+            launch(
+                config,
+                sources={},
+                popen=popen_stub,
+                base_env={},
+                joblimit_factory=_FailingJobLimit,
+            )
+        # Even on attach failure, close() must run.
+        assert len(recorded) == 1
+        assert recorded[0].close_calls == 1  # type: ignore[attr-defined]

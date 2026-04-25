@@ -7,6 +7,47 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2 joblimit (Win32 Job Object resource limits)
+- `recto.joblimit` module: `JobLimit` class wrapping a Win32 Job Object,
+  `plan_for(spec) -> _JobLimitPlan` (pure planning layer), `JoblimitError`
+  exception. `JobLimit` enforces `spec.resource_limits` at the kernel
+  level: `memory_mb` -> `JOB_OBJECT_LIMIT_PROCESS_MEMORY` (per-process
+  committed-memory cap), `cpu_percent` -> CpuRateControlInformation
+  (hard cap, 1/100ths of a percent), `process_count` -> ActiveProcessLimit.
+  Plus an unconditional `KILL_ON_JOB_CLOSE` so the supervised child
+  dies with the launcher even on orphaned-launcher / panicked-launcher
+  paths NSSM doesn't catch.
+- Cross-platform import safe: when no resource_limits are set (the
+  common case), `JobLimit` is an inert shell — `attach()` and `close()`
+  are no-ops without touching Win32. When limits ARE requested on a
+  non-Windows host, the constructor raises `JoblimitError` ("Job Object
+  limits require Windows"). Same pattern as `recto.secrets.credman`.
+- Two-layer design for testability: `plan_for` is pure (tests assert
+  on the returned dataclass directly), and the four ctypes-touching
+  methods (`_create_job_object` / `_apply_limits` / `_assign_process`
+  / `_close_handle`) are split into overridable seams. Tests use a
+  `FakeJobLimit` subclass that records every call without invoking
+  ctypes, mirroring the `CredManSource` / `FakeCredManSource` pattern.
+- `recto.launcher.JoblimitFactory` callable alias and `joblimit_factory`
+  kwarg on `launch()` / `run()` / `_spawn_and_wait`. Production passes
+  the real `JobLimit`; tests inject stubs.
+- Test suite grew to 324 (+24 from v0.2 reconcile): 20 new tests in
+  `tests/test_joblimit.py` covering plan computation across each limit
+  type, KILL_ON_JOB_CLOSE always-on flag, JobLimit lifecycle (attach +
+  close + double-close idempotence + context-manager exit), and the
+  non-Windows guard. 4 new tests in `tests/test_launcher.py::TestJoblimitWiring`
+  covering the launcher integration: no-limits path skips attach,
+  limits-set path attaches + closes, finally-block runs even on attach
+  failure (with re-raise so the run-loop sees the error).
+
+### Changed — v0.2 joblimit
+- `recto.launcher._spawn_and_wait` constructs a `JobLimit` after
+  `popen()` returns and attaches the child PID before entering the
+  wait loop. The `proc.pid` access is gated on `joblimit.handle is not
+  None` so the existing test stubs that don't expose `.pid` keep
+  working unchanged. The `finally` block always closes the JobLimit
+  whether the wait exited naturally or via probe-driven termination.
+
 ### Added — v0.2 reconcile (`recto apply`)
 - `recto.reconcile` module: `ReconcilePlan` / `FieldChange` dataclasses,
   `compute_plan(cfg, current, *, yaml_path, python_exe)`,

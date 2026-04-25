@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 
 from recto.config import ServiceConfig
 from recto.healthz import HealthzProbe
+from recto.joblimit import JobLimit
 from recto.restart import MaxAttemptsReachedError, next_delay, should_restart
 from recto.secrets import SecretSource
 
@@ -31,6 +32,7 @@ def run(
     poll_interval_seconds: float = 0.5,
     terminate_grace_seconds: float = 5.0,
     dispatcher_factory: Callable[..., object] | None = None,
+    joblimit_factory: Callable[..., JobLimit] = JobLimit,
 ) -> int:
     """Run the supervised child with the configured restart policy.
 
@@ -71,6 +73,7 @@ def run(
                 poll_interval_seconds=poll_interval_seconds,
                 terminate_grace_seconds=terminate_grace_seconds,
                 dispatcher=dispatcher,
+                joblimit_factory=joblimit_factory,
             )
             if not should_restart(last_rc, config.spec.restart):
                 _emit_event(

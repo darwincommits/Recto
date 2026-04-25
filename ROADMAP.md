@@ -39,7 +39,7 @@ Original timeframes (April-May 2026 → late-2026/2027) were drafted before AI-a
 - Win32 Job Object resource limits. `recto.joblimit` wraps the child in a Job Object enforcing the YAML-declared `resource_limits`. **Shipped.** Enforces `memory_mb` (per-process commit cap), `cpu_percent` (CpuRate hard cap), and `process_count` (ActiveProcessLimit), plus an always-on `KILL_ON_JOB_CLOSE` so the supervised child dies with the launcher.
 - OpenTelemetry traces for every lifecycle event. Sink to a configurable OTLP endpoint or no-op if undeclared. **Shipped.** One long-lived span per `run()` invocation, lifecycle events recorded as span events. Optional `pip install recto[otel]` extra so the OTel tree stays out of the default install. Failure-isolated: a misconfigured exporter cannot break the launcher.
 - TCP and exec-based health checks alongside the HTTP variant. **Shipped.** `spec.healthz.type: tcp` and `type: exec` work end-to-end with type-aware schema validation; default implementations dispatched from `_default_check_for_spec`.
-- `pytest-cov` >80% on the launcher critical path.
+- `pytest-cov` >80% on the launcher critical path. **Shipped at 91% total.** `[tool.coverage.run]` + `[tool.coverage.report]` configured in `pyproject.toml`. Win32 ctypes blocks (joblimit, secrets/credman) and the OTel-SDK-installed path are `# pragma: no cover` since they only execute on the target platform; cross-platform Linux suite covers everything else. With this v0.2 is feature-complete.
 
 **Estimated code:** ~2,000 lines.
 

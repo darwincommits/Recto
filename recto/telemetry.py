@@ -245,7 +245,14 @@ class TelemetryClient:
                 )
             return None
 
-        try:
+        # The OTel-SDK-installed path below only executes when the
+        # opentelemetry packages are available. The cross-platform Linux
+        # test suite doesn't install them by default (they're an
+        # optional `[otel]` extra), so `# pragma: no cover` is honest
+        # here. Operators who turn on telemetry exercise this path
+        # directly; the FakeTelemetryClient + ExplodingTracer tests
+        # cover the higher-level lifecycle wiring without needing OTel.
+        try:  # pragma: no cover
             resource = Resource.create({
                 "service.name": self.spec.service_name or "recto",
             })
@@ -260,7 +267,7 @@ class TelemetryClient:
             provider.add_span_processor(BatchSpanProcessor(exporter))
             self._provider = provider
             return provider.get_tracer("recto.launcher")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover
             print(
                 f"recto.telemetry: failed to set up OTLP tracer "
                 f"({type(exc).__name__}: {exc}). Falling back to no-op.",

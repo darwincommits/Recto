@@ -71,3 +71,22 @@ warn_unused_ignores = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["recto"]
+# `_launcher_part2.py` was a transitional stub from v0.1; exclude in
+# case it ever resurfaces in a stale checkout.
+omit = ["recto/_launcher_part2.py"]
+
+[tool.coverage.report]
+# The Win32 ctypes blocks in joblimit.py + secrets/credman.py and the
+# OTel-SDK-installed path in telemetry.py are marked `# pragma: no
+# cover` inline -- they only execute on Windows (or with the [otel]
+# extra installed). The cross-platform Linux suite covers everything
+# else; Darwin's smoke run exercises the platform-specific paths.
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

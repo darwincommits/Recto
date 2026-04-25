@@ -147,12 +147,17 @@ def _ensure_windows() -> None:
         )
 
 
-def _win_read_blob(target: str) -> str:
+def _win_read_blob(target: str) -> str:  # pragma: no cover
     """Read a credential's blob value, decoded as UTF-16-LE.
 
     Raises:
         SecretNotFoundError: ERROR_NOT_FOUND from CredReadW (1168).
         SecretSourceError: any other Win32 error.
+
+    Marked `# pragma: no cover`: this is Windows-only ctypes binding.
+    The cross-platform Linux suite covers CredManSource via the
+    FakeCredManSource subclass that overrides the four `_*_blob`
+    methods. Real Win32 behavior is exercised by Darwin's smoke run.
     """
     _ensure_windows()
     advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
@@ -184,7 +189,7 @@ def _win_read_blob(target: str) -> str:
         advapi32.CredFree(p_cred)
 
 
-def _win_write_blob(target: str, value: str, comment: str = "") -> None:
+def _win_write_blob(target: str, value: str, comment: str = "") -> None:  # pragma: no cover
     """Store / update a credential. CredWriteW is upsert by default."""
     _ensure_windows()
     advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
@@ -222,7 +227,7 @@ def _win_write_blob(target: str, value: str, comment: str = "") -> None:
         ctypes.memset(blob_buf, 0, len(blob))
 
 
-def _win_delete_blob(target: str) -> None:
+def _win_delete_blob(target: str) -> None:  # pragma: no cover
     """Remove a credential by target name."""
     _ensure_windows()
     advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]
@@ -242,7 +247,7 @@ def _win_delete_blob(target: str) -> None:
         )
 
 
-def _win_list_targets(filter_pattern: str) -> list[str]:
+def _win_list_targets(filter_pattern: str) -> list[str]:  # pragma: no cover
     """List target names matching the wildcard pattern. Pass '*' to list all."""
     _ensure_windows()
     advapi32 = ctypes.windll.advapi32  # type: ignore[attr-defined]

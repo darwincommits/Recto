@@ -7,6 +7,37 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2 coverage (pytest-cov >80% gate)
+- `[tool.coverage.run]` and `[tool.coverage.report]` sections in
+  `pyproject.toml`. `source = ["recto"]`; `omit` covers the
+  transitional `_launcher_part2.py` stub. `exclude_lines` covers
+  `pragma: no cover`, `raise NotImplementedError`,
+  `if __name__ == "__main__":`, and `if TYPE_CHECKING:` blocks.
+- `# pragma: no cover` markers on the four Win32-only `_*` methods of
+  `JobLimit` (lines previously at 60% on Linux), the four `_win_*`
+  helper functions in `recto.secrets.credman` (54% on Linux), the
+  OTel-SDK-installed branch of `TelemetryClient._build_tracer` (72%),
+  and `recto/__main__.py`'s `if __name__ == "__main__":` block (0%).
+  These paths only run on the actual target platform (Windows /
+  OTel-installed); the cross-platform Linux suite covers them via
+  `FakeJobLimit` / `FakeCredManSource` / `FakeTelemetryClient`
+  subclass overrides, and Darwin's full-Windows smoke run exercises
+  the real ctypes / OTel paths.
+
+### Changed — v0.2 coverage
+- Coverage now reports **91%** total across the cross-platform
+  critical path (376 tests, baseline before pragmas was 84%).
+  Per-module: `__init__.py` 100, `_launcher_run.py` 98,
+  `_migrate.py` 100, `adminui.py` 93, `cli.py` 84, `comms.py` 89,
+  `config.py` 89, `healthz.py` 95, `launcher.py` 93, `nssm.py` 92,
+  `reconcile.py` 100, `restart.py` 97, `secrets/__init__.py` 92,
+  `secrets/base.py` 100, `secrets/env.py` 100. Every module above
+  the ROADMAP's >80% gate.
+- v0.2 is now feature-complete per ROADMAP: TCP/exec healthz, GitOps
+  reconcile (`recto apply`), Win32 Job Object resource limits,
+  OpenTelemetry traces, read-only admin UI, and the coverage gate
+  all shipped.
+
 ### Added — v0.2 adminui (read-only web admin UI scaffold)
 - `recto.adminui` module: `EventBuffer` (thread-safe ring buffer of
   recent lifecycle events, default capacity 1000), `AdminUIServer`

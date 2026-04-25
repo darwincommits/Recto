@@ -13,6 +13,27 @@
 | Config format | YAML, `apiVersion: recto/v1` | Familiar to anyone who's read Kubernetes / systemd / docker-compose. Versioned for forward compat. |
 | Secret backend interface | `SecretSource` ABC returning `SecretMaterial` (sealed type: `DirectSecret` or `SigningCapability`) | Forward-compatible with v0.4 hardware-enclave backends where the secret never leaves the enclave. v0.1 only uses `DirectSecret`. |
 
+## Design decisions (post-v0.1 scaffold)
+
+### 2026-04-25 — Launcher polls child + healthz probe in tandem
+
+The launcher's `_spawn_and_wait` does NOT block on `proc.wait()`. Instead
+it polls `proc.poll()` and `probe.restart_required` on a configurable
+interval (default 0.5s). When the probe trips while the child is still
+running, the launcher SIGTERMs the child, waits up to a grace window
+(default 5s) for clean shutdown, then SIGKILLs if needed, and returns
+the resulting exit code. This means a healthz-detected deadlock surfaces
+to the restart policy as a non-zero exit and feeds the existing
+backoff/max-attempts machinery — no second restart code path.
+
+Trade-off: 0.5s polling adds a small fixed CPU cost per supervised
+service. Acceptable for v0.1 (services are long-lived, the launcher is
+one-per-service, and modern Windows boxes don't care about a 2 Hz Python
+poll). If the poll cost ever shows up in profiling, the alternative is
+an OS-level event-driven approach (`WaitForMultipleObjects` on Windows,
+`select` / `epoll` on POSIX) — but that adds platform-specific code
+where the simple poll-loop is portable.
+
 ## The service-config YAML schema
 
 The `apiVersion: recto/v1` shape is locked. Fields are additive after v0.1; no removals without two-minor-version deprecation.

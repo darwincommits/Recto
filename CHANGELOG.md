@@ -21,7 +21,8 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `recto.launcher.run` restart-loop wrapper: drives `recto.restart` policy decisions across child exits, brackets lifecycle init/teardown ONCE around the whole loop (so long-lived backends stay open across restarts), emits `restart.attempt` / `max_attempts_reached` / `run.final_exit` events.
 - `recto.restart` policy module: pure functions `should_restart(returncode, policy)` and `next_delay(attempt, policy)` driving exponential / linear / constant backoff with `max_delay_seconds` cap and `MaxAttemptsReachedError` exhaustion signal. Stateless, trivially unit-testable.
 - `recto.healthz.HealthzProbe` HTTP liveness probe: threaded daemon polling `spec.healthz.url` every `interval_seconds`, signaling `restart_required` after `failure_threshold` consecutive failures. v0.1 supports `type: http` only; tcp + exec deferred to v0.2.
-- Test suite: 139 tests across config validation, secret-source backends, launcher orchestration (one-shot + restart-loop), restart policy, and healthz probe. All cross-platform; subprocess.Popen and SecretSource stubbed so no real children spawn.
+- Test suite: 145 tests across config validation, secret-source backends, launcher orchestration (one-shot + restart-loop + healthz wiring), restart policy, and healthz probe. All cross-platform; subprocess.Popen, SecretSource, and HealthzProbe stubbed so no real children spawn or HTTP requests fly.
+- `recto.launcher._spawn_and_wait` integrates HealthzProbe: starts a probe per spawn (when `spec.healthz.enabled`), polls child exit AND probe `restart_required` event in tandem, terminates child via SIGTERM-then-SIGKILL when the probe signals unhealthy. Probe lifetime is bracketed in a `try/finally` so a stop-failure cannot leak a thread or mask the child's exit code. `child.exit` event now carries a `healthz_signaled` flag so downstream comms know whether the exit was natural or probe-driven. `probe_factory` / `poll_interval_seconds` / `terminate_grace_seconds` are injectable through `launch()` and `run()` for tests.
 
 ### Changed
 - `recto/__init__.py` surface comment updated to mention launcher + config + register_source as part of the v0.1 public API.
@@ -29,4 +30,3 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Notes for next-up v0.1 work
 - `recto.comms` (webhook dispatch) subscribes to events emitted by `recto.launcher._emit_event(...)` and posts to `spec.comms[].url` with template interpolation. Hook point is marked `TODO(v0.1)` in `recto.launcher`.
 - `recto.cli` exposes `recto launch <yaml>`, `recto credman {set,list,delete}`, `recto status`, `recto migrate-from-nssm`.
-- Wire `HealthzProbe` into `launcher.run` so a probe-driven restart synthesizes a non-zero exit and feeds the same restart-policy machinery.

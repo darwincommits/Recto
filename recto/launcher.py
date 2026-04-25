@@ -9,15 +9,18 @@ to subprocess.Popen.
 Design notes
 ------------
 
-This v0.1 cut is deliberately synchronous: launch() spawns the child,
-blocks on .wait(), and returns the child's exit code. The pieces that
-make Recto a *supervisor* rather than a one-shot launcher — restart
-policy, healthz probe loop, webhook event dispatch — live in their
-own modules and wire in here at the labelled hook points (search this
-file for "TODO(v0.1)"). Splitting them up keeps each module unit-testable
-in isolation: the launcher's contract is "given a config and a way to
-spawn, run the child correctly"; the restart module's contract is "given
-an exit code and a policy, decide whether to relaunch"; etc.
+This v0.1 cut is synchronous from the launcher's perspective: launch()
+spawns the child and polls its exit-vs-healthz-trip status until either
+fires, then returns the child's exit code. The supervisor pieces — restart
+policy, healthz probe loop, webhook event dispatch — live in their own
+modules and either wire in here (recto.healthz, recto.restart, both
+shipped) or remain TODO(v0.1) hook points (recto.comms). Splitting them
+up keeps each module unit-testable in isolation: the launcher's contract
+is "given a config and a way to spawn, run the child correctly"; the
+restart module's contract is "given an exit code and a policy, decide
+whether to relaunch"; the probe's contract is "tell the launcher when
+the child has gone unresponsive"; the comms module's eventual contract
+is "post webhook events when lifecycle things happen."
 
 Secret material handling
 ------------------------

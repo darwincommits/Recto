@@ -125,6 +125,25 @@ operator-specific detail that crept into a public file and move it.
 Generic technical gotchas only. Operator-environment-specific gotchas live
 in `.claude/local.md`.
 
+- **Force-push doesn't overwrite when local is a fast-forward descendant
+  of remote.** `git push --force` only rewrites remote history if local
+  has a different ancestry. If local main is a clean descendant of
+  origin/main (you cloned, made one commit on top), `--force` is a no-op
+  beyond what a regular push would do — the remote history grows by your
+  appended commit; nothing is overwritten. To truly REWRITE history (e.g.
+  scrub leak terms from earlier commits, replace an auto-generated
+  Initial commit), build an orphan branch:
+  ```
+  git checkout --orphan fresh-main
+  git add .
+  git commit -m "..."
+  git branch -D main
+  git branch -m fresh-main main
+  git push --force origin main
+  ```
+  The orphan has no parent, so local and remote share zero ancestry, so
+  `--force` actually overwrites. The push output should include
+  `(forced update)`.
 - **`datetime.UTC` requires Python 3.11+.** Recto's `pyproject.toml` targets
   3.12, so `from datetime import UTC` is fine in production. If a contributor's
   test environment is on 3.10 (some CI base images, some sandboxes), the

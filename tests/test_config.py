@@ -1,4 +1,4 @@
-"""Tests for recto.config — YAML loader + schema validator."""
+"""Tests for recto.config -- YAML loader + schema validator."""
 
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ class TestSecrets:
             **MINIMAL_VALID,
             "spec": {
                 "exec": "x",
-                "secrets": [{"name": "K", "source": "credman"}],  # no target_env
+                "secrets": [{"name": "K", "source": "credman"}],
             },
         }
         with pytest.raises(ConfigValidationError) as exc_info:
@@ -238,6 +238,130 @@ class TestHealthz:
         with pytest.raises(ConfigValidationError) as exc_info:
             load_config(bad)
         assert any("interval_seconds" in p for p in exc_info.value.problems)
+
+    def test_tcp_loads_with_host_and_port(self) -> None:
+        ok = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {
+                    "enabled": True,
+                    "type": "tcp",
+                    "host": "127.0.0.1",
+                    "port": 5432,
+                },
+            },
+        }
+        c = load_config(ok)
+        assert c.spec.healthz.type == "tcp"
+        assert c.spec.healthz.host == "127.0.0.1"
+        assert c.spec.healthz.port == 5432
+
+    def test_tcp_enabled_requires_host(self) -> None:
+        bad = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {"enabled": True, "type": "tcp", "port": 8080},
+            },
+        }
+        with pytest.raises(ConfigValidationError) as exc_info:
+            load_config(bad)
+        assert any("host" in p for p in exc_info.value.problems)
+
+    def test_tcp_enabled_rejects_bad_port(self) -> None:
+        for bad_port in (0, -1, 70000):
+            bad = {
+                **MINIMAL_VALID,
+                "spec": {
+                    "exec": "x",
+                    "healthz": {
+                        "enabled": True,
+                        "type": "tcp",
+                        "host": "h",
+                        "port": bad_port,
+                    },
+                },
+            }
+            with pytest.raises(ConfigValidationError) as exc_info:
+                load_config(bad)
+            assert any("port" in p for p in exc_info.value.problems), (
+                f"expected port complaint for port={bad_port}, "
+                f"got: {exc_info.value.problems}"
+            )
+
+    def test_tcp_disabled_does_not_require_host(self) -> None:
+        ok = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {"type": "tcp", "enabled": False},
+            },
+        }
+        c = load_config(ok)
+        assert c.spec.healthz.type == "tcp"
+
+    def test_exec_loads_with_command(self) -> None:
+        ok = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {
+                    "enabled": True,
+                    "type": "exec",
+                    "command": ["my-check", "--mode=quick"],
+                    "expected_exit_code": 0,
+                },
+            },
+        }
+        c = load_config(ok)
+        assert c.spec.healthz.type == "exec"
+        assert c.spec.healthz.command == ("my-check", "--mode=quick")
+        assert c.spec.healthz.expected_exit_code == 0
+
+    def test_exec_enabled_requires_command(self) -> None:
+        bad = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {"enabled": True, "type": "exec"},
+            },
+        }
+        with pytest.raises(ConfigValidationError) as exc_info:
+            load_config(bad)
+        assert any("command" in p for p in exc_info.value.problems)
+
+    def test_exec_command_must_be_list(self) -> None:
+        bad = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {
+                    "enabled": True,
+                    "type": "exec",
+                    "command": "my-check --mode=quick",
+                },
+            },
+        }
+        with pytest.raises(ConfigValidationError) as exc_info:
+            load_config(bad)
+        assert any("command" in p for p in exc_info.value.problems)
+
+    def test_exec_custom_expected_exit_code_loads(self) -> None:
+        ok = {
+            **MINIMAL_VALID,
+            "spec": {
+                "exec": "x",
+                "healthz": {
+                    "enabled": True,
+                    "type": "exec",
+                    "command": ["custom-check"],
+                    "expected_exit_code": 7,
+                },
+            },
+        }
+        c = load_config(ok)
+        assert c.spec.healthz.expected_exit_code == 7
 
 
 class TestRestart:
@@ -335,8 +459,6 @@ class TestFullValid:
 
 class TestErrorAggregation:
     def test_multiple_problems_in_single_error(self) -> None:
-        # Stack several distinct issues; ConfigValidationError should report
-        # all of them in one shot rather than failing on the first.
         bad = {
             "apiVersion": "recto/v999",
             "kind": "DaemonSet",
@@ -346,7 +468,7 @@ class TestErrorAggregation:
         with pytest.raises(ConfigValidationError) as exc_info:
             load_config(bad)
         problems = exc_info.value.problems
-        assert len(problems) >= 3  # apiVersion + kind + metadata.name + spec.exec
+        assert len(problems) >= 3
         rendered = str(exc_info.value)
         assert "apiVersion" in rendered
         assert "kind" in rendered

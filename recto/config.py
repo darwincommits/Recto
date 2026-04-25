@@ -20,7 +20,7 @@ Design notes:
   field, the resulting dataclass instance is the documented default.
 
 This module does NOT do template interpolation (${env:VAR} substitution
-in comms.headers, etc.) — that's a runtime concern owned by recto.comms
+in comms.headers, etc.) -- that's a runtime concern owned by recto.comms
 at dispatch time. Config validates structure; runtime substitutes values.
 """
 
@@ -37,13 +37,7 @@ SUPPORTED_KINDS = ("Service",)
 
 
 class ConfigValidationError(Exception):
-    """One or more structural / semantic problems in a service.yaml.
-
-    Use ConfigValidationError.from_problems(list[Problem]) to construct;
-    str(err) renders all problems with their dotted paths so the user
-    can find each one without re-reading the YAML. See _validate_*
-    helpers for typical usage.
-    """
+    """One or more structural / semantic problems in a service.yaml."""
 
     def __init__(self, problems: list[str]):
         self.problems = list(problems)
@@ -60,8 +54,7 @@ class ConfigValidationError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class SecretSpec:
-    """One entry under spec.secrets. Tells the launcher to fetch a named
-    secret from a backend and inject it into the child process's env."""
+    """One entry under spec.secrets."""
 
     name: str
     source: str
@@ -72,21 +65,63 @@ class SecretSpec:
 
 @dataclass(frozen=True, slots=True)
 class HealthzSpec:
-    """Liveness probe configuration. enabled=False means no probe runs."""
+    """Liveness probe configuration. enabled=False means no probe runs.
+
+    Three probe types ship in v0.2:
+    - http: GET url with timeout_seconds; 2xx/3xx is healthy.
+    - tcp: open a TCP connection to host:port; success is healthy.
+    - exec: run command (list of args); expected_exit_code is healthy.
+
+    Each type uses a different subset of the fields below. Required-field
+    validation is type-aware: e.g. url is required for http+enabled,
+    host + port are required for tcp+enabled, command is required for
+    exec+enabled. Unused fields stay at their defaults and are ignored
+    at runtime.
+    """
 
     enabled: bool = False
     type: str = "http"
     url: str = ""
+    # tcp-only:
+    host: str = ""
+    port: int = 0
+    # exec-only:
+    command: tuple[str, ...] = ()
+    expected_exit_code: int = 0
     interval_seconds: int = 30
     timeout_seconds: int = 5
     failure_threshold: int = 3
     restart_grace_seconds: int = 10
 
     def __post_init__(self) -> None:
-        if self.enabled and not self.url and self.type == "http":
+        if self.type not in ("http", "tcp", "exec"):
             raise ConfigValidationError(
-                ["spec.healthz: 'url' is required when type=http and enabled=true"]
+                [f"spec.healthz.type: must be one of http|tcp|exec, got {self.type!r}"]
             )
+        if self.enabled:
+            if self.type == "http" and not self.url:
+                raise ConfigValidationError(
+                    ["spec.healthz: 'url' is required when type=http and enabled=true"]
+                )
+            if self.type == "tcp":
+                if not self.host:
+                    raise ConfigValidationError(
+                        ["spec.healthz: 'host' is required when type=tcp and enabled=true"]
+                    )
+                if not (1 <= self.port <= 65535):
+                    raise ConfigValidationError(
+                        [
+                            f"spec.healthz.port: must be 1..65535 when type=tcp and "
+                            f"enabled=true, got {self.port}"
+                        ]
+                    )
+            if self.type == "exec" and not self.command:
+                raise ConfigValidationError(
+                    [
+                        "spec.healthz: 'command' is required (non-empty list) "
+                        "when type=exec and enabled=true"
+                    ]
+                )
         if self.interval_seconds <= 0:
             raise ConfigValidationError(
                 [f"spec.healthz.interval_seconds: must be > 0, got {self.interval_seconds}"]
@@ -105,10 +140,6 @@ class HealthzSpec:
                     f"spec.healthz.restart_grace_seconds: must be >= 0, "
                     f"got {self.restart_grace_seconds}"
                 ]
-            )
-        if self.type not in ("http", "tcp", "exec"):
-            raise ConfigValidationError(
-                [f"spec.healthz.type: must be one of http|tcp|exec, got {self.type!r}"]
             )
 
 
@@ -159,7 +190,7 @@ class RestartSpec:
 
 @dataclass(frozen=True, slots=True)
 class CommsSpec:
-    """One webhook destination under spec.comms. Multiple allowed."""
+    """One webhook destination under spec.comms."""
 
     type: str = "webhook"
     url: str = ""
@@ -177,8 +208,7 @@ class CommsSpec:
 
 @dataclass(frozen=True, slots=True)
 class ResourceLimitsSpec:
-    """Win32 Job Object resource limits. v0.2 will enforce these at runtime;
-    v0.1 stores them so the YAML can be future-proofed."""
+    """Win32 Job Object resource limits (v0.2 enforces them)."""
 
     memory_mb: int | None = None
     cpu_percent: int | None = None
@@ -220,8 +250,6 @@ class TelemetrySpec:
 
 @dataclass(frozen=True, slots=True)
 class ServiceMeta:
-    """metadata: section of the YAML."""
-
     name: str
     description: str = ""
 
@@ -239,8 +267,6 @@ class ServiceMeta:
 
 @dataclass(frozen=True, slots=True)
 class ServiceSpec:
-    """spec: section of the YAML."""
-
     exec: str
     args: tuple[str, ...] = ()
     working_dir: str = ""
@@ -257,22 +283,19 @@ class ServiceSpec:
     def __post_init__(self) -> None:
         if not self.exec:
             raise ConfigValidationError(["spec.exec: required"])
-        # Detect duplicate target_env values across secrets (would clobber).
         env_targets = [s.target_env for s in self.secrets if s.target_env]
         dupes = {e for e in env_targets if env_targets.count(e) > 1}
         if dupes:
             raise ConfigValidationError(
                 [
                     f"spec.secrets: duplicate target_env values: {sorted(dupes)} "
-                    f"— each secret must inject into a distinct env var"
+                    f"-- each secret must inject into a distinct env var"
                 ]
             )
 
 
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
-    """Parsed service.yaml. Top-level container."""
-
     apiVersion: str
     kind: str
     metadata: ServiceMeta
@@ -296,7 +319,6 @@ class ServiceConfig:
 
 
 def _require(d: dict[str, Any], key: str, path: str, problems: list[str]) -> Any:
-    """Look up a required key in a dict; record problem and return None if missing."""
     if key not in d:
         problems.append(f"{path}.{key}: required")
         return None
@@ -336,22 +358,7 @@ def _build_comms_spec(d: dict[str, Any], path: str, problems: list[str]) -> Comm
 
 
 def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
-    """Load and validate a service.yaml.
-
-    Args:
-        source: Path or path-string to a YAML file, OR a pre-parsed dict
-                (useful for testing without a file on disk).
-
-    Returns:
-        Validated ServiceConfig.
-
-    Raises:
-        ConfigValidationError: structural / semantic problems. The error
-            carries `.problems`, a list of human-readable problem strings
-            with dotted paths.
-        FileNotFoundError: the path doesn't exist.
-        yaml.YAMLError: malformed YAML.
-    """
+    """Load and validate a service.yaml."""
     if isinstance(source, dict):
         data = source
     elif isinstance(source, (str, Path)):
@@ -378,10 +385,6 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
     metadata_raw = data.get("metadata", {})
     spec_raw = data.get("spec", {})
 
-    # Validate apiVersion + kind here, not just inside ServiceConfig.__post_init__,
-    # so the errors aggregate into the same problems list as everything else.
-    # ServiceConfig will re-validate these on construction; the redundancy is
-    # cheap and keeps the final-construction path simple.
     upfront_problems: list[str] = []
     if api_version not in SUPPORTED_API_VERSIONS:
         upfront_problems.append(
@@ -401,7 +404,6 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         problems.append("spec: must be a mapping")
         spec_raw = {}
 
-    # metadata
     metadata: ServiceMeta | None = None
     name = metadata_raw.get("name", "")
     description = metadata_raw.get("description", "")
@@ -410,7 +412,6 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
     except ConfigValidationError as e:
         problems.extend(e.problems)
 
-    # spec.secrets
     secrets_raw = spec_raw.get("secrets", []) or []
     secrets: list[SecretSpec] = []
     for i, s in enumerate(secrets_raw):
@@ -421,17 +422,26 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         if ss is not None:
             secrets.append(ss)
 
-    # spec.healthz
     healthz: HealthzSpec | None = None
     healthz_raw = spec_raw.get("healthz", {}) or {}
     if not isinstance(healthz_raw, dict):
         problems.append("spec.healthz: must be a mapping")
     else:
         try:
+            command_raw = healthz_raw.get("command") or ()
+            if not isinstance(command_raw, (list, tuple)):
+                problems.append(
+                    "spec.healthz.command: must be a list of strings"
+                )
+                command_raw = ()
             healthz = HealthzSpec(
                 enabled=bool(healthz_raw.get("enabled", False)),
                 type=str(healthz_raw.get("type", "http")),
                 url=str(healthz_raw.get("url", "")),
+                host=str(healthz_raw.get("host", "")),
+                port=int(healthz_raw.get("port", 0)),
+                command=tuple(str(c) for c in command_raw),
+                expected_exit_code=int(healthz_raw.get("expected_exit_code", 0)),
                 interval_seconds=int(healthz_raw.get("interval_seconds", 30)),
                 timeout_seconds=int(healthz_raw.get("timeout_seconds", 5)),
                 failure_threshold=int(healthz_raw.get("failure_threshold", 3)),
@@ -440,9 +450,8 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         except ConfigValidationError as e:
             problems.extend(e.problems)
         except (TypeError, ValueError) as e:
-            problems.append(f"spec.healthz: type error — {e}")
+            problems.append(f"spec.healthz: type error -- {e}")
 
-    # spec.restart
     restart: RestartSpec | None = None
     restart_raw = spec_raw.get("restart", {}) or {}
     if not isinstance(restart_raw, dict):
@@ -464,9 +473,8 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         except ConfigValidationError as e:
             problems.extend(e.problems)
         except (TypeError, ValueError) as e:
-            problems.append(f"spec.restart: type error — {e}")
+            problems.append(f"spec.restart: type error -- {e}")
 
-    # spec.comms
     comms_raw = spec_raw.get("comms", []) or []
     comms: list[CommsSpec] = []
     for i, c in enumerate(comms_raw):
@@ -477,7 +485,6 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         if cs is not None:
             comms.append(cs)
 
-    # spec.resource_limits
     rl: ResourceLimitsSpec | None = None
     rl_raw = spec_raw.get("resource_limits", {}) or {}
     if not isinstance(rl_raw, dict):
@@ -492,7 +499,6 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         except ConfigValidationError as e:
             problems.extend(e.problems)
 
-    # spec.admin_ui
     aui = AdminUISpec(
         enabled=bool((spec_raw.get("admin_ui") or {}).get("enabled", False)),
         bind=str((spec_raw.get("admin_ui") or {}).get("bind", "127.0.0.1:5050")),
@@ -504,18 +510,12 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
         ),
     )
 
-    # spec.telemetry
     tele = TelemetrySpec(
         enabled=bool((spec_raw.get("telemetry") or {}).get("enabled", False)),
         otlp_endpoint=str((spec_raw.get("telemetry") or {}).get("otlp_endpoint", "")),
         service_name=str((spec_raw.get("telemetry") or {}).get("service_name", "")),
     )
 
-    # spec — keep validating even if metadata/healthz/restart/rl had errors,
-    # so error aggregation surfaces all problems in a single shot. We use
-    # safe defaults for any sub-section that failed so the ServiceSpec
-    # constructor doesn't blow up on None inputs; the original problems
-    # are already in the `problems` list and will surface in the final raise.
     spec: ServiceSpec | None = None
     args = spec_raw.get("args", []) or []
     if not isinstance(args, list):
@@ -528,9 +528,6 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
     if not spec_raw.get("exec"):
         problems.append("spec.exec: required")
     try:
-        # Use defaults for any sub-section that failed validation so we can
-        # still construct the parent — its own __post_init__ catches its
-        # own constraints (duplicate target_env, etc.) which we want surfaced.
         spec = ServiceSpec(
             exec=str(spec_raw.get("exec", "")) or "<unset>",
             args=tuple(str(a) for a in args),
@@ -548,18 +545,11 @@ def load_config(source: Path | str | dict[str, Any]) -> ServiceConfig:
     except ConfigValidationError as e:
         problems.extend(e.problems)
 
-    # Final ServiceConfig assembly. If we got here with metadata or spec
-    # still None, problems is non-empty and we raise without trying to
-    # construct (which would crash on None inputs).
     if metadata is None or spec is None:
         if not problems:
             problems.append("internal: metadata or spec failed silently")
         raise ConfigValidationError(problems)
 
-    # If upfront_problems already flagged apiVersion/kind, those errors
-    # are already in the problems list — substitute valid placeholders
-    # for the ServiceConfig() call to avoid duplicate complaints from
-    # __post_init__. The originals are still surfaced via the problems list.
     safe_api = (
         api_version
         if api_version in SUPPORTED_API_VERSIONS

@@ -7,6 +7,34 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2 healthz
+- TCP healthz probe (`spec.healthz.type: tcp`): opens a TCP connection to
+  `host:port` with `timeout_seconds`; success is healthy. Lighter-weight
+  than HTTP for services that don't expose a `/healthz` endpoint but DO
+  listen on a port.
+- Exec healthz probe (`spec.healthz.type: exec`): runs `command` (list
+  of args) with `timeout_seconds`; exit code matching
+  `expected_exit_code` (default 0) is healthy. Useful for services with
+  a bespoke health check (database connection test, custom CLI tool,
+  etc.). Stdout/stderr captured (not surfaced) so health checks stay
+  quiet on the launcher's own stream.
+- New `recto.healthz.ProbeCheck` callable type and `default_tcp_check`
+  / `default_exec_check` / `default_http_check` default implementations.
+  `HealthzProbe` now accepts a general `check=` parameter alongside the
+  v0.1 HTTP-only `fetch=` seam (which is preserved for backward
+  compatibility).
+- `HealthzSpec` schema additions: `host: str`, `port: int` (tcp-only),
+  `command: tuple[str, ...]`, `expected_exit_code: int` (exec-only).
+  Validation is type-aware: tcp+enabled requires `host` + `port`
+  (1..65535); exec+enabled requires non-empty `command`.
+
+### Changed — v0.2 healthz
+- `recto.healthz.HealthzProbe` dispatches on `spec.healthz.type` to pick
+  the default check; HTTP path unchanged. Backward compatibility:
+  passing `fetch=` to a probe still works for v0.1-era HTTP tests.
+  Passing both `fetch=` and `check=` raises `TypeError` so callers don't
+  accidentally double-up.
+
 ### Added
 - Initial scaffold: LICENSE (Apache 2.0), README, .gitignore, pyproject.toml, CHANGELOG.
 - ARCHITECTURE.md design doc covering YAML schema, pluggable secret-source backends, NSSM relationship, threat model.
@@ -85,9 +113,14 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parsing of the generated YAML).
 
 ### Notes for next-up work
-- v0.1 is now feature-complete per ROADMAP. Next: v0.2 operational
-  maturity (admin UI, GitOps reconcile, Job Object resource limits,
-  OpenTelemetry traces, TCP + exec health checks, pytest-cov >80%).
-- Delete `recto/_launcher_part2.py` (left behind during the comms
-  work; can't be removed via the Cowork sandbox bash, see the Gotchas
-  note in CLAUDE.md).
+- v0.2 progress: TCP + exec health checks shipped (this entry).
+  Remaining v0.2 scope: admin UI, GitOps reconcile (`recto apply`),
+  Win32 Job Object resource limits, OpenTelemetry traces, pytest-cov
+  >80% on launcher critical path.
+- Test suite grew to 266 (+27 from v0.1 cli work): 19 new tests in
+  `tests/test_healthz.py` covering tcp + exec dispatch, default
+  implementations against real sockets / real subprocesses, and the
+  legacy `fetch=` backward-compat seam; 8 new tests in
+  `tests/test_config.py` covering tcp + exec schema validation
+  (host/port/command required when enabled, type-specific defaults,
+  custom expected_exit_code).

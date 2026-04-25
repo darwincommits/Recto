@@ -59,7 +59,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from recto.config import ServiceConfig, ServiceSpec
+from recto.config import HealthzSpec, ServiceConfig, ServiceSpec
+from recto.healthz import HealthzProbe
 from recto.restart import MaxAttemptsReachedError, next_delay, should_restart
 from recto.secrets import (
     DirectSecret,
@@ -82,7 +83,14 @@ __all__ = [
 PopenFactory = Callable[..., "subprocess.Popen[Any]"]
 """Subprocess.Popen-shaped callable. Tests inject a stub; production uses
 subprocess.Popen directly. The stub is expected to accept (cmd, env=...,
-cwd=...) and return an object with a .wait() method returning an int."""
+cwd=...) and return an object with .poll() and .wait() and .terminate()
+and .kill() methods (subprocess.Popen's interface)."""
+
+
+ProbeFactory = Callable[[HealthzSpec], HealthzProbe]
+"""HealthzSpec -> HealthzProbe. Tests inject a stub that records start()/
+stop() and lets the test trip restart_required deterministically. Production
+uses HealthzProbe directly."""
 
 
 class LauncherError(Exception):
@@ -179,6 +187,9 @@ def launch(
     sources: Mapping[str, SecretSource] | None = None,
     popen: PopenFactory = subprocess.Popen,
     base_env: Mapping[str, str] | None = None,
+    probe_factory: ProbeFactory = HealthzProbe,
+    poll_interval_seconds: float = 0.5,
+    terminate_grace_seconds: float = 5.0,
 ) -> int:
     """Run the supervised child. Returns the child's exit code.
 
@@ -209,7 +220,15 @@ def launch(
         sources = resolve_sources(config)
 
     with _bracket_lifecycle(config, sources):
-        return _spawn_and_wait(config, sources, popen, base_env)
+        return _spawn_and_wait(
+            config,
+            sources,
+            popen,
+            base_env,
+            probe_factory=probe_factory,
+            poll_interval_seconds=poll_interval_seconds,
+            terminate_grace_seconds=terminate_grace_seconds,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +270,39 @@ def _spawn_and_wait(
     sources: Mapping[str, SecretSource],
     popen: PopenFactory,
     base_env: Mapping[str, str] | None,
+    *,
+    probe_factory: ProbeFactory = HealthzProbe,
+    poll_interval_seconds: float = 0.5,
+    terminate_grace_seconds: float = 5.0,
 ) -> int:
-    """Build the child env, spawn, wait. Lifecycle bracketing is the
-    caller's job. Used by both launch() (brackets per call) and run()
-    (brackets once around the whole restart loop)."""
+    """Build child env, spawn, wait for exit OR healthz unhealthy signal.
+
+    Lifecycle bracketing of SecretSource is the caller's job (launch /
+    run handle it). This function owns the per-spawn HealthzProbe
+    lifetime: builds one if `config.spec.healthz.enabled`, starts it
+    after Popen, stops it before returning regardless of how the child
+    exits.
+
+    If the probe trips `restart_required` while the child is still
+    running, the launcher terminates the child (with a
+    `terminate_grace_seconds` graceful window before SIGKILL on POSIX /
+    forcible kill on Windows) and returns the resulting exit code. The
+    restart-policy machinery in run() then decides whether to relaunch.
+
+    Args:
+        probe_factory: HealthzSpec -> HealthzProbe. Tests inject a stub
+            that records start()/stop() and lets the test trip
+            restart_required deterministically.
+        poll_interval_seconds: how often to check proc.poll() and
+            probe.restart_required. 0.5s is fine for production; tests
+            pass 0 to spin as fast as possible.
+        terminate_grace_seconds: SIGTERM-then-wait window before forcing
+            SIGKILL. Production default 5.0s; tests use small values.
+
+    TODO(v0.1): webhook dispatch on lifecycle events — recto.comms
+    subscribes to events emitted via _emit_event() and posts to
+    config.spec.comms[].url.
+    """
     env = build_child_env(config.spec, sources, base_env=base_env)
     cmd: list[str] = [config.spec.exec, *config.spec.args]
     cwd: str | None = config.spec.working_dir or None
@@ -269,16 +317,63 @@ def _spawn_and_wait(
         },
     )
 
-    # TODO(v0.1): healthz probe runs in parallel — recto.healthz wires
-    # in here, started after Popen and stopped before .wait() returns.
-    # TODO(v0.1): webhook dispatch on lifecycle events — recto.comms
-    # subscribes to events emitted via _emit_event() and posts to
-    # config.spec.comms[].url.
-
     proc = popen(cmd, env=env, cwd=cwd)
-    rc = int(proc.wait())
-    _emit_event(config, "child.exit", {"returncode": rc})
+
+    probe: HealthzProbe | None = None
+    if config.spec.healthz.enabled:
+        probe = probe_factory(config.spec.healthz)
+        probe.start()
+
+    healthz_signaled = False
+    try:
+        rc = _wait_for_exit_or_unhealthy(
+            proc,
+            probe,
+            poll_interval_seconds=poll_interval_seconds,
+            terminate_grace_seconds=terminate_grace_seconds,
+        )
+        if probe is not None and probe.restart_required.is_set():
+            healthz_signaled = True
+    finally:
+        if probe is not None:
+            probe.stop()
+
+    _emit_event(
+        config,
+        "child.exit",
+        {"returncode": rc, "healthz_signaled": healthz_signaled},
+    )
     return rc
+
+
+def _wait_for_exit_or_unhealthy(
+    proc: subprocess.Popen[Any],
+    probe: HealthzProbe | None,
+    *,
+    poll_interval_seconds: float,
+    terminate_grace_seconds: float,
+) -> int:
+    """Block until the child exits or the probe signals unhealthy.
+
+    Returns the child's exit code in either case. If the probe trips
+    first, the child is terminated; we then wait for it to actually
+    exit and return its (typically non-zero) returncode.
+    """
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            return int(rc)
+        if probe is not None and probe.restart_required.is_set():
+            # Healthz says restart. SIGTERM the child, give it a grace
+            # window, then SIGKILL if it didn't shut down cleanly.
+            proc.terminate()
+            try:
+                rc = proc.wait(timeout=terminate_grace_seconds)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                rc = proc.wait()
+            return int(rc)
+        time.sleep(poll_interval_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +388,9 @@ def run(
     popen: PopenFactory = subprocess.Popen,
     base_env: Mapping[str, str] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    probe_factory: ProbeFactory = HealthzProbe,
+    poll_interval_seconds: float = 0.5,
+    terminate_grace_seconds: float = 5.0,
 ) -> int:
     """Run the supervised child with the configured restart policy.
 
@@ -327,7 +425,15 @@ def run(
         attempt = 0
         last_rc = 0
         while True:
-            last_rc = _spawn_and_wait(config, sources, popen, base_env)
+            last_rc = _spawn_and_wait(
+                config,
+                sources,
+                popen,
+                base_env,
+                probe_factory=probe_factory,
+                poll_interval_seconds=poll_interval_seconds,
+                terminate_grace_seconds=terminate_grace_seconds,
+            )
             if not should_restart(last_rc, config.spec.restart):
                 _emit_event(
                     config,

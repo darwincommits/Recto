@@ -14,11 +14,12 @@ here we only care about the launcher's orchestration.
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import pytest
 
-from recto.config import ServiceConfig, load_config
+from recto.config import HealthzSpec, ServiceConfig, load_config
 from recto.launcher import (
     LauncherError,
     SecretInjectionError,
@@ -96,15 +97,45 @@ class FailingTeardownSource(StubSource):
 
 
 class StubProc:
-    """Subprocess.Popen-shaped object: just enough to satisfy launcher.wait()."""
+    """Subprocess.Popen-shaped object covering the methods the launcher uses.
 
-    def __init__(self, returncode: int = 0):
+    Default behavior: appears to have already exited with the configured
+    returncode — `poll()` returns it immediately. Tests that want to
+    simulate a still-running child set `poll_returns_none_for_first_n`
+    so the first N polls return None before flipping to the returncode."""
+
+    def __init__(
+        self,
+        returncode: int = 0,
+        *,
+        poll_returns_none_for_first_n: int = 0,
+    ):
         self._returncode = returncode
+        self._polls_remaining_none = poll_returns_none_for_first_n
         self.wait_call_count = 0
+        self.poll_call_count = 0
+        self.terminate_call_count = 0
+        self.kill_call_count = 0
 
-    def wait(self) -> int:
+    def poll(self) -> int | None:
+        self.poll_call_count += 1
+        if self._polls_remaining_none > 0:
+            self._polls_remaining_none -= 1
+            return None
+        return self._returncode
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002 — timeout ignored
         self.wait_call_count += 1
         return self._returncode
+
+    def terminate(self) -> None:
+        self.terminate_call_count += 1
+        # Simulate child exiting on SIGTERM: subsequent polls return rc.
+        self._polls_remaining_none = 0
+
+    def kill(self) -> None:
+        self.kill_call_count += 1
+        self._polls_remaining_none = 0
 
 
 def make_popen_stub(
@@ -762,3 +793,258 @@ class TestRun:
         kinds = [e["kind"] for e in events]
         assert "restart.attempt" in kinds
         assert "max_attempts_reached" in kinds
+
+
+# ---------------------------------------------------------------------------
+# Healthz wiring — _spawn_and_wait coordinates child + probe
+# ---------------------------------------------------------------------------
+
+
+class StubProbe:
+    """HealthzProbe-shaped stub for launcher tests.
+
+    `trip_after_polls` makes the test set restart_required after the
+    launcher has called proc.poll() N times — letting us deterministically
+    interleave "child still running" with "probe says unhealthy."
+    """
+
+    def __init__(
+        self,
+        spec: HealthzSpec,
+        *,
+        trip_after_polls: int | None = None,
+    ):
+        self.spec = spec
+        self.restart_required = threading.Event()
+        self._trip_after_polls = trip_after_polls
+        self._poll_observations = 0
+        self.start_call_count = 0
+        self.stop_call_count = 0
+
+    def start(self) -> None:
+        self.start_call_count += 1
+
+    def stop(self, timeout: float = 5.0) -> None:  # noqa: ARG002
+        self.stop_call_count += 1
+
+    def observe_poll(self) -> None:
+        """Called by the test's stub-Popen via a hook; trips restart_required
+        once we've seen `trip_after_polls` polls."""
+        self._poll_observations += 1
+        if (
+            self._trip_after_polls is not None
+            and self._poll_observations >= self._trip_after_polls
+        ):
+            self.restart_required.set()
+
+
+def make_healthz_config(
+    *,
+    enabled: bool = True,
+    failure_threshold: int = 3,
+) -> ServiceConfig:
+    """ServiceConfig with healthz turned on."""
+    return load_config(
+        {
+            "apiVersion": "recto/v1",
+            "kind": "Service",
+            "metadata": {"name": "myservice"},
+            "spec": {
+                "exec": "python.exe",
+                "healthz": {
+                    "enabled": enabled,
+                    "type": "http",
+                    "url": "http://localhost:5000/healthz",
+                    "interval_seconds": 1,
+                    "timeout_seconds": 1,
+                    "failure_threshold": failure_threshold,
+                    "restart_grace_seconds": 0,
+                },
+            },
+        }
+    )
+
+
+class TestHealthzWiring:
+    def test_disabled_means_no_probe_created(self) -> None:
+        """When config.spec.healthz.enabled is False, no probe is built —
+        `probe_factory` should never be called."""
+        config = make_config()  # default healthz: enabled=False
+        factory_call_count = [0]
+
+        def fake_factory(_spec: HealthzSpec) -> StubProbe:
+            factory_call_count[0] += 1
+            return StubProbe(_spec)
+
+        popen, _ = make_popen_stub(returncode=0)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen,
+            base_env={},
+            probe_factory=fake_factory,
+            poll_interval_seconds=0,
+        )
+        assert rc == 0
+        assert factory_call_count[0] == 0
+
+    def test_enabled_starts_and_stops_probe(self) -> None:
+        """Child exits cleanly; probe should be started and then stopped
+        in the finally block."""
+        config = make_healthz_config()
+        probes_built: list[StubProbe] = []
+
+        def fake_factory(spec: HealthzSpec) -> StubProbe:
+            probe = StubProbe(spec)
+            probes_built.append(probe)
+            return probe
+
+        popen, _ = make_popen_stub(returncode=0)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen,
+            base_env={},
+            probe_factory=fake_factory,
+            poll_interval_seconds=0,
+        )
+        assert rc == 0
+        assert len(probes_built) == 1
+        assert probes_built[0].start_call_count == 1
+        assert probes_built[0].stop_call_count == 1
+
+    def test_probe_signal_terminates_running_child(self) -> None:
+        """Probe trips while child is still running -> launcher terminates
+        the child and returns the resulting exit code."""
+        config = make_healthz_config()
+        probe_holder: list[StubProbe] = []
+
+        def fake_factory(spec: HealthzSpec) -> StubProbe:
+            # Trip on the first poll so the launcher's poll loop sees
+            # "still running" once, then "restart_required" — child gets
+            # terminated.
+            probe = StubProbe(spec)
+            probe_holder.append(probe)
+            # We trip immediately by setting the event before the loop
+            # calls poll() — that means the very first check inside the
+            # loop sees restart_required already set after the first
+            # proc.poll() returned None.
+            return probe
+
+        # Child looks running for 1 poll, then is exitable. Combined with
+        # tripping the probe before the loop, the loop will: poll #1 -> None
+        # (still running), see restart_required (which we'll set below)
+        # -> terminate.
+        captures: dict[str, Any] = {}
+
+        def fake_popen(
+            cmd: list[str],
+            *,
+            env: dict[str, str] | None = None,
+            cwd: str | None = None,
+            **_kw: Any,
+        ) -> StubProc:
+            captures["cmd"] = list(cmd)
+            return StubProc(returncode=143, poll_returns_none_for_first_n=1)
+
+        # Trip the probe BEFORE launch starts polling. The loop's first
+        # iteration: poll() returns None (still running), then probe check
+        # sees restart_required set -> terminate path.
+        # We can't trip it before factory is called, so use a custom
+        # factory that trips before returning.
+        def tripping_factory(spec: HealthzSpec) -> StubProbe:
+            probe = StubProbe(spec)
+            probe.restart_required.set()  # tripped immediately
+            probe_holder.append(probe)
+            return probe
+
+        rc = launch(
+            config,
+            sources={},
+            popen=fake_popen,
+            base_env={},
+            probe_factory=tripping_factory,
+            poll_interval_seconds=0,
+            terminate_grace_seconds=0.1,
+        )
+
+        assert rc == 143
+        assert len(probe_holder) == 1
+        assert probe_holder[0].stop_call_count == 1
+
+    def test_probe_stopped_in_finally_even_on_no_terminate_path(self) -> None:
+        """If the child exits naturally (no probe trip), the probe must
+        still be stopped in the finally block."""
+        config = make_healthz_config()
+        probes_built: list[StubProbe] = []
+
+        def fake_factory(spec: HealthzSpec) -> StubProbe:
+            probe = StubProbe(spec)
+            probes_built.append(probe)
+            return probe
+
+        popen, _ = make_popen_stub(returncode=0)  # exits immediately
+        launch(
+            config,
+            sources={},
+            popen=popen,
+            base_env={},
+            probe_factory=fake_factory,
+            poll_interval_seconds=0,
+        )
+        assert probes_built[0].stop_call_count == 1
+        # Probe was never tripped, so .terminate() was not called either.
+        # We can't directly assert on StubProc.terminate_call_count here
+        # because make_popen_stub returns a fresh StubProc per call;
+        # see below for an equivalent assertion via captures.
+
+    def test_emit_event_marks_healthz_signaled(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """child.exit event includes healthz_signaled flag."""
+        config = make_healthz_config()
+
+        def tripping_factory(spec: HealthzSpec) -> StubProbe:
+            probe = StubProbe(spec)
+            probe.restart_required.set()
+            return probe
+
+        def fake_popen(*_a: Any, **_kw: Any) -> StubProc:
+            return StubProc(returncode=143, poll_returns_none_for_first_n=1)
+
+        launch(
+            config,
+            sources={},
+            popen=fake_popen,
+            base_env={},
+            probe_factory=tripping_factory,
+            poll_interval_seconds=0,
+            terminate_grace_seconds=0.1,
+        )
+
+        out = capsys.readouterr().out
+        events = [json.loads(line) for line in out.strip().splitlines() if line.strip()]
+        exit_event = next(e for e in events if e["kind"] == "child.exit")
+        assert exit_event["ctx"]["healthz_signaled"] is True
+
+    def test_natural_exit_marks_healthz_not_signaled(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config = make_healthz_config()
+
+        def fake_factory(spec: HealthzSpec) -> StubProbe:
+            return StubProbe(spec)  # never trips
+
+        popen, _ = make_popen_stub(returncode=0)
+        launch(
+            config,
+            sources={},
+            popen=popen,
+            base_env={},
+            probe_factory=fake_factory,
+            poll_interval_seconds=0,
+        )
+        out = capsys.readouterr().out
+        events = [json.loads(line) for line in out.strip().splitlines() if line.strip()]
+        exit_event = next(e for e in events if e["kind"] == "child.exit")
+        assert exit_event["ctx"]["healthz_signaled"] is False

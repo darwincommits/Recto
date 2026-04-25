@@ -620,3 +620,275 @@ class TestMainErrorPaths:
         )
         # missing file path lands at 1 before we ever hit launch_fn.
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# apply subcommand
+# ---------------------------------------------------------------------------
+
+
+def _make_apply_yaml(tmp_path: Path, *, name: str = "myservice") -> Path:
+    yaml_path = tmp_path / "service.yaml"
+    yaml_path.write_text(
+        f"apiVersion: recto/v1\n"
+        f"kind: Service\n"
+        f"metadata:\n"
+        f"  name: {name}\n"
+        f"  description: An example service\n"
+        f"spec:\n"
+        f"  exec: python.exe\n"
+        f'  working_dir: "C:\\\\path\\\\{name}"\n',
+        encoding="utf-8",
+    )
+    return yaml_path
+
+
+class TestApplyCommandParsing:
+    def test_apply_with_dry_run(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["apply", "service.yaml", "--dry-run"])
+        assert args.command == "apply"
+        assert args.yaml_path == "service.yaml"
+        assert args.dry_run is True
+        assert args.yes is False
+        assert args.python_exe == "python.exe"
+
+    def test_apply_with_yes_short_flag(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["apply", "service.yaml", "-y"])
+        assert args.yes is True
+
+    def test_apply_with_python_exe_override(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["apply", "x.yaml", "--python-exe", "C:\\Python312\\python.exe"]
+        )
+        assert args.python_exe == "C:\\Python312\\python.exe"
+
+
+class TestApplyDispatch:
+    def test_dry_run_prints_plan_and_exits_without_mutating(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        # Empty NSSM config: every field needs a change.
+        nssm_stub = FakeNssmClient(
+            config=NssmConfig(service="myservice")
+        )
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path), "--dry-run"],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        assert "recto apply: myservice" in out.getvalue()
+        assert "--dry-run; no changes made" in out.getvalue()
+        # Critical: no NSSM mutations.
+        assert nssm_stub.set_calls == []
+        assert nssm_stub.reset_calls == []
+
+    def test_yes_flag_skips_prompt_and_applies(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(config=NssmConfig(service="myservice"))
+        out, err = _capture()
+        # confirm should NOT be called when --yes is set; pass a confirm
+        # that would fail the test if it were.
+        def boom_confirm(_p: str) -> str:
+            raise AssertionError("confirm should not be called with --yes")
+
+        rc = cli.main(
+            ["apply", str(yaml_path), "--yes"],
+            nssm_factory=lambda: nssm_stub,
+            confirm=boom_confirm,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        assert len(nssm_stub.set_calls) == 5  # all five scalar fields
+        # No AppEnvironmentExtra reset (current state had it empty).
+        assert nssm_stub.reset_calls == []
+        assert "applied 5 change(s)" in out.getvalue()
+
+    def test_interactive_y_applies(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(config=NssmConfig(service="myservice"))
+        prompts_seen: list[str] = []
+
+        def confirm_yes(prompt: str) -> str:
+            prompts_seen.append(prompt)
+            return "y"
+
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path)],
+            nssm_factory=lambda: nssm_stub,
+            confirm=confirm_yes,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        assert len(prompts_seen) == 1
+        assert "Apply" in prompts_seen[0]
+        assert len(nssm_stub.set_calls) == 5
+
+    def test_interactive_n_aborts(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(config=NssmConfig(service="myservice"))
+
+        def confirm_no(_p: str) -> str:
+            return "n"
+
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path)],
+            nssm_factory=lambda: nssm_stub,
+            confirm=confirm_no,
+            stdout=out,
+            stderr=err,
+        )
+        # Aborting is a successful no-op (exit 0), not an error.
+        assert rc == 0
+        assert "aborted" in out.getvalue()
+        assert nssm_stub.set_calls == []
+
+    def test_interactive_eof_aborts(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(config=NssmConfig(service="myservice"))
+
+        def confirm_eof(_p: str) -> str:
+            raise EOFError()
+
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path)],
+            nssm_factory=lambda: nssm_stub,
+            confirm=confirm_eof,
+            stdout=out,
+            stderr=err,
+        )
+        # EOF on stdin (e.g. Ctrl-D, or `recto apply ... < /dev/null`) is
+        # treated as "no" -- safer default than re-raising.
+        assert rc == 0
+        assert nssm_stub.set_calls == []
+
+    def test_no_changes_needed_returns_zero_without_apply(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        # Build NSSM state to match what cfg implies.
+        nssm_stub = FakeNssmClient(
+            config=NssmConfig(
+                service="myservice",
+                app_path="python.exe",
+                app_parameters=f"-m recto launch {yaml_path.resolve()}",
+                app_directory="C:\\path\\myservice",
+                display_name="An example service",
+                description="An example service",
+            )
+        )
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path), "--yes"],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        assert "no changes needed" in out.getvalue()
+        assert nssm_stub.set_calls == []
+        assert nssm_stub.reset_calls == []
+
+    def test_invalid_yaml_returns_one(self, tmp_path: Path) -> None:
+        # Syntactically valid YAML but invalid Recto schema (wrong
+        # apiVersion). Tests the ConfigValidationError code path.
+        # (yaml.YAMLError parse failures are a separate handler gap
+        # affecting both `apply` and `launch`; tracked for follow-up.)
+        bad_path = tmp_path / "bad.yaml"
+        bad_path.write_text(
+            "apiVersion: recto/v999\n"
+            "kind: Service\n"
+            "metadata:\n  name: x\n"
+            "spec:\n  exec: x\n",
+            encoding="utf-8",
+        )
+        nssm_stub = FakeNssmClient(config=NssmConfig(service="x"))
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(bad_path)],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 1
+        assert "invalid config" in err.getvalue()
+
+    def test_missing_yaml_file_returns_one(self, tmp_path: Path) -> None:
+        nssm_stub = FakeNssmClient(config=NssmConfig(service="x"))
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(tmp_path / "no-such-file.yaml")],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 1
+        assert "file not found" in err.getvalue()
+
+    def test_nssm_service_not_found_returns_one(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(not_found=True)
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path)],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 1
+        assert "not found" in err.getvalue()
+        # The error should mention the migration path as a hint.
+        assert "migrate-from-nssm" in err.getvalue()
+
+    def test_nssm_not_installed_returns_one(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(not_installed=True)
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path)],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 1
+        assert "nssm" in err.getvalue().lower()
+
+    def test_environment_extra_clear_summarized(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml(tmp_path, name="myservice")
+        nssm_stub = FakeNssmClient(
+            config=NssmConfig(
+                service="myservice",
+                app_path="python.exe",
+                app_parameters=f"-m recto launch {yaml_path.resolve()}",
+                app_directory="C:\\path\\myservice",
+                display_name="An example service",
+                description="An example service",
+                # Stale plaintext secret -- the apply should clear it.
+                app_environment_extra=("LEFTOVER=value",),
+            )
+        )
+        out, err = _capture()
+        rc = cli.main(
+            ["apply", str(yaml_path), "--yes"],
+            nssm_factory=lambda: nssm_stub,
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        assert nssm_stub.set_calls == []  # all scalar fields matched
+        assert nssm_stub.reset_calls == [("myservice", "AppEnvironmentExtra")]
+        assert "cleared AppEnvironmentExtra" in out.getvalue()
+        # Critical: the leftover secret value MUST NOT appear in stdout.
+        assert "LEFTOVER" not in out.getvalue()
+        assert "value" not in out.getvalue().split("(s)")[-1]

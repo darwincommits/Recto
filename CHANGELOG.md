@@ -7,6 +7,48 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2 reconcile (`recto apply`)
+- `recto.reconcile` module: `ReconcilePlan` / `FieldChange` dataclasses,
+  `compute_plan(cfg, current, *, yaml_path, python_exe)`,
+  `render_plan(plan)`, `apply_plan(plan, nssm)`. Pure-functional plan
+  computation + rendering; only `apply_plan` has side effects (routes
+  through `NssmClient`).
+- `recto apply <yaml> [--python-exe PATH] [--yes|-y] [--dry-run]` CLI
+  subcommand. Reads a service.yaml, reads the current NSSM state,
+  computes a diff, prints it, prompts y/N (default), then applies via
+  `NssmClient`. Replaces imperative `nssm set ...` PowerShell with
+  declarative GitOps. Reconciles AppPath, AppParameters, AppDirectory,
+  DisplayName, Description, and clears AppEnvironmentExtra if non-empty
+  (so plaintext secrets stop sitting in the registry once a service
+  has been migrated to CredMan).
+- `recto._migrate` private module — `_migration_plan` / `_generate_service_yaml`
+  / `_escape_yaml` (renamed `build_migration_plan` / `generate_service_yaml`
+  / `escape_yaml`) extracted from `recto.cli` to keep cli.py under the
+  Cowork sandbox's Write-tool size threshold. Same pattern as
+  `recto._launcher_run`. Public CLI behavior unchanged.
+- `ConfirmFn` callable alias in `recto.cli` (defaults to `builtins.input`)
+  so tests can inject scripted y/N responses without monkeypatching.
+- Test suite grew to 300 (+33 from v0.2 healthz): 19 new tests in
+  `tests/test_reconcile.py` covering plan computation across no-op /
+  single-field / full-change / AppEnvironmentExtra-clear scenarios,
+  rendering markers (`~` for changed, blank for unchanged, `!` for
+  the env-extra clear), apply-call ordering, and the no-leak guarantee
+  (env-extra values never appear in plan output); 14 new tests in
+  `tests/test_cli.py::TestApplyDispatch` covering dry-run no-mutate,
+  --yes skips prompt, interactive y/n/EOF, no-changes-needed exit-0
+  path, invalid YAML, missing file, NSSM-not-found, NSSM-not-installed,
+  AppEnvironmentExtra clear summarized.
+
+### Changed — v0.2 reconcile
+- `recto.secrets.credman.CredManSource` raises `SecretSourceError`
+  (instead of `NotImplementedError`) when instantiated on a non-Windows
+  host without `platform_check=False`. The internal `_ensure_windows()`
+  helper raises the same error type. Per Darwin's 2026-04-25 IM-update
+  suggestion: SecretSourceError is the canonical secret-backend error
+  class, so `except SecretSourceError` paths in the launcher now catch
+  platform mismatches uniformly with other backend failures. Adds 1
+  test covering the helper directly.
+
 ### Added — v0.2 healthz
 - TCP healthz probe (`spec.healthz.type: tcp`): opens a TCP connection to
   `host:port` with `timeout_seconds`; success is healthy. Lighter-weight

@@ -13,6 +13,9 @@ Subcommands:
                                                 YAML, import secrets to
                                                 credman, retarget AppPath,
                                                 clear AppEnvironmentExtra
+    recto apply <yaml>                        - reconcile NSSM state to
+                                                match a service.yaml
+                                                (GitOps-style diff + apply)
 
 The CLI is a thin dispatcher. Each subcommand handler delegates to one
 of `recto.launcher`, `recto.secrets.credman`, `recto.config`, or
@@ -54,6 +57,16 @@ from recto.nssm import (
     NssmStatus,
     split_environment_extra,
 )
+from recto._migrate import (
+    build_migration_plan,
+    generate_service_yaml,
+)
+from recto.reconcile import (
+    ReconcilePlan,
+    apply_plan,
+    compute_plan,
+    render_plan,
+)
 from recto.secrets import (
     CredManSource,
     SecretNotFoundError,
@@ -87,6 +100,12 @@ PromptFn = Callable[[str], str]
 """(prompt) -> value. Production uses getpass.getpass; tests pass a fake."""
 
 
+ConfirmFn = Callable[[str], str]
+"""(prompt) -> raw user input. Production uses builtins.input; tests pass a
+fake that returns a canned 'y' / 'n' / etc. Distinct from PromptFn because
+confirmation answers are visible (echoed) where secret values are not."""
+
+
 LaunchFn = Callable[..., int]
 """(config, **kwargs) -> exit_code. Wraps recto.launcher.run so tests
 can verify the CLI dispatches correctly without spawning a child."""
@@ -116,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command",
         title="subcommands",
         required=True,
-        metavar="{launch,credman,status,migrate-from-nssm}",
+        metavar="{launch,credman,status,migrate-from-nssm,apply}",
     )
 
     # launch ---------------------------------------------------------------
@@ -244,6 +263,42 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # apply ----------------------------------------------------------------
+    p_apply = sub.add_parser(
+        "apply",
+        help="Reconcile NSSM service state to match a service.yaml.",
+        description=(
+            "Read a service.yaml, read the current NSSM state for the "
+            "named service, compute a diff, and apply changes so NSSM "
+            "matches the YAML. Replaces imperative `nssm set ...` "
+            "PowerShell with declarative GitOps. Default: prompt for "
+            "confirmation before applying. Use --dry-run to print the "
+            "plan without changing anything; --yes to skip the prompt "
+            "(scripted use)."
+        ),
+    )
+    p_apply.add_argument("yaml_path", help="Path to service.yaml")
+    p_apply.add_argument(
+        "--python-exe",
+        default="python.exe",
+        help=(
+            "Path to the python.exe NSSM should invoke (becomes "
+            "AppPath). Default: python.exe (resolved via PATH at "
+            "service-start time)."
+        ),
+    )
+    p_apply.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the y/N confirmation prompt. Apply immediately.",
+    )
+    p_apply.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the plan and exit without applying anything.",
+    )
+
     return parser
 
 
@@ -258,6 +313,7 @@ def main(
     credman_factory: CredManFactory | None = None,
     nssm_factory: NssmFactory | None = None,
     prompt: PromptFn = getpass.getpass,
+    confirm: ConfirmFn = input,
     launch_fn: LaunchFn | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
@@ -316,6 +372,11 @@ def main(
             cred = (credman_factory or _default_credman_factory)(args.service)
             return _cmd_migrate_from_nssm(
                 args, nssm=nssm, cred=cred, out=out, err=err
+            )
+        if cmd == "apply":
+            nssm = (nssm_factory or _default_nssm_factory)()
+            return _cmd_apply(
+                args, nssm=nssm, confirm=confirm, out=out, err=err
             )
     except KeyboardInterrupt:
         print("\nrecto: interrupted", file=err)
@@ -540,7 +601,7 @@ def _cmd_migrate_from_nssm(
         "\n".join(nssm_cfg.app_environment_extra)
     ))
 
-    plan = _migration_plan(
+    plan = build_migration_plan(
         nssm_cfg=nssm_cfg,
         secrets=secrets,
         yaml_out=yaml_out_path,
@@ -558,7 +619,7 @@ def _cmd_migrate_from_nssm(
     try:
         for key, value in secrets:
             cred.write(key, value, comment=f"Migrated from NSSM:{service}")
-        yaml_text = _generate_service_yaml(
+        yaml_text = generate_service_yaml(
             service=service,
             nssm_cfg=nssm_cfg,
             secret_keys=[k for k, _ in secrets],
@@ -586,99 +647,90 @@ def _cmd_migrate_from_nssm(
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Migration helpers
-# ---------------------------------------------------------------------------
-
-
-def _migration_plan(
+def _cmd_apply(
+    args: argparse.Namespace,
     *,
-    nssm_cfg: NssmConfig,
-    secrets: list[tuple[str, str]],
-    yaml_out: Path,
-    python_exe: str,
-) -> dict[str, Any]:
-    """Build a dict describing what migrate-from-nssm WOULD do.
+    nssm: NssmClient,
+    confirm: ConfirmFn,
+    out: TextIO,
+    err: TextIO,
+) -> int:
+    """Handle ``recto apply <yaml> [--python-exe PATH] [--yes] [--dry-run]``.
 
-    Secret VALUES are masked (replaced with '<redacted>') so the plan
-    can be JSON-printed without leaking. Operator should review the
-    plan with --dry-run before applying.
+    Steps:
+        1. Load + validate the YAML config.
+        2. Read current NSSM state for ``cfg.metadata.name``.
+        3. Compute the reconcile plan.
+        4. Print the plan.
+        5. If no changes: exit 0.
+           If --dry-run: exit 0 without applying.
+           If --yes or interactive y: apply via ``apply_plan``.
+           Otherwise: print "aborted" and exit 0.
+
+    Exit codes:
+        0 - success (applied, no-op, dry-run, or user-aborted).
+        1 - YAML invalid, file missing, NSSM not installed, NSSM
+            service not found, or apply failed mid-flight.
     """
-    return {
-        "service": nssm_cfg.service,
-        "current_app_path": nssm_cfg.app_path,
-        "current_app_parameters": nssm_cfg.app_parameters,
-        "current_app_directory": nssm_cfg.app_directory,
-        "current_environment_extra_count": len(secrets),
-        "secrets_to_install": [
-            {"name": k, "value": "<redacted>"} for k, _ in secrets
-        ],
-        "yaml_out": str(yaml_out),
-        "new_app_path": python_exe,
-        "new_app_parameters": f"-m recto launch {yaml_out}",
-    }
+    yaml_path = Path(args.yaml_path).resolve()
+    try:
+        cfg: ServiceConfig = load_config(yaml_path)
+    except ConfigValidationError as exc:
+        print(f"recto apply: invalid config: {exc}", file=err)
+        return 1
+    except FileNotFoundError:
+        print(f"recto apply: file not found: {yaml_path}", file=err)
+        return 1
 
+    service = cfg.metadata.name
+    try:
+        current = nssm.get_all(service)
+    except NssmServiceNotFoundError:
+        print(
+            f"recto apply: NSSM service {service!r} not found. "
+            f"Either register it first via `nssm install {service}`, "
+            f"or use `recto migrate-from-nssm <service>` if you're "
+            f"migrating an existing non-Recto service.",
+            file=err,
+        )
+        return 1
+    except NssmNotInstalledError as exc:
+        print(f"recto apply: {exc}", file=err)
+        return 1
+    except NssmError as exc:
+        print(f"recto apply: {exc}", file=err)
+        return 1
 
-def _generate_service_yaml(
-    *,
-    service: str,
-    nssm_cfg: NssmConfig,
-    secret_keys: list[str],
-) -> str:
-    """Produce the generated service.yaml text.
+    plan: ReconcilePlan = compute_plan(
+        cfg, current, yaml_path=yaml_path, python_exe=args.python_exe
+    )
+    print(render_plan(plan), file=out)
 
-    Hand-rolled (not via PyYAML's dump) so we control formatting:
-    fields appear in a stable order, comments are preserved, and the
-    output is human-reviewable. PyYAML's default style would munge
-    quoting on values with `:` or `#` and lose readability.
-    """
-    lines: list[str] = []
-    a = lines.append
-    a("# Generated by `recto migrate-from-nssm`.")
-    a(f"# Source NSSM service: {nssm_cfg.service}")
-    a("# Review and edit before relying on this in production.")
-    a("apiVersion: recto/v1")
-    a("kind: Service")
-    a("metadata:")
-    a(f"  name: {service}")
-    if nssm_cfg.display_name:
-        a(f"  description: \"{_escape_yaml(nssm_cfg.display_name)}\"")
-    a("spec:")
-    a(f"  exec: \"{_escape_yaml(nssm_cfg.app_path)}\"")
-    if nssm_cfg.app_parameters:
-        # AppParameters is one string; split into argv-ish words for the
-        # YAML's args list. Naive whitespace split is correct for the
-        # common case; users with quoted args will have to hand-edit.
-        a("  args:")
-        for w in nssm_cfg.app_parameters.split():
-            a(f"    - \"{_escape_yaml(w)}\"")
-    if nssm_cfg.app_directory:
-        a(f"  working_dir: \"{_escape_yaml(nssm_cfg.app_directory)}\"")
-    if secret_keys:
-        a("  secrets:")
-        for key in secret_keys:
-            a(f"    - name: {key}")
-            a("      source: credman")
-            a(f"      target_env: {key}")
-            a("      required: true")
-    a("  restart:")
-    a("    policy: always")
-    a("    backoff: exponential")
-    a("    initial_delay_seconds: 1")
-    a("    max_delay_seconds: 60")
-    a("    max_attempts: 10")
-    a("")
-    return "\n".join(lines)
+    if plan.is_noop:
+        return 0
+    if args.dry_run:
+        print("recto apply: --dry-run; no changes made", file=out)
+        return 0
+    if not args.yes:
+        try:
+            answer = confirm("Apply these changes? (y/N): ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("recto apply: aborted (no changes made)", file=out)
+            return 0
 
-
-def _escape_yaml(s: str) -> str:
-    """Escape backslashes and double-quotes for YAML double-quoted strings.
-
-    We only emit double-quoted scalars in the generated YAML, so the
-    only escaping needed is `\\` -> `\\\\` and `"` -> `\\"`. Newlines
-    are left as-is; the migrate path doesn't expect multi-line values.
-    """
-    return s.replace("\\", "\\\\").replace("\"", "\\\"")
+    try:
+        apply_plan(plan, nssm)
+    except NssmError as exc:
+        print(f"recto apply: apply failed: {exc}", file=err)
+        return 1
+    summary = f"recto apply: applied {len(plan.changes)} change(s)"
+    if plan.clear_environment_extra:
+        summary += " + cleared AppEnvironmentExtra"
+    summary += "."
+    print(summary, file=out)
+    return 0
 
 
 # ---------------------------------------------------------------------------

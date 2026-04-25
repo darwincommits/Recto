@@ -18,8 +18,11 @@ Manager usage.
 Platform: Windows only. Importing this module on non-Windows is allowed
 (so platform-detection code can do `from .credman import CredManSource`
 without crashing), but instantiating CredManSource without
-platform_check=False raises NotImplementedError. The actual ctypes
-calls are wrapped in `_ensure_windows()` and gated on sys.platform.
+platform_check=False raises SecretSourceError("CredMan backend requires
+Windows"). The actual ctypes calls are wrapped in `_ensure_windows()`
+which raises the same error type — that's deliberate so callers can
+`except SecretSourceError` once and catch both instantiation-time
+and call-time failures.
 
 Testing: subclass CredManSource and override the four `_*_blob` /
 `_list_targets` methods to back them with an in-memory dict. See
@@ -128,9 +131,18 @@ class _CREDENTIALW(ctypes.Structure):
 
 
 def _ensure_windows() -> None:
+    """Guard for the Win32 ctypes calls. Raises SecretSourceError on non-Windows.
+
+    Defense in depth: CredManSource.__init__ already rejects non-Windows
+    by default, so we only get here if a caller bypassed the guard via
+    platform_check=False but then forgot to override the _* methods. Per
+    Darwin's 2026-04-25 IM-update suggestion: a clean SecretSourceError
+    surfaces better than the bare AttributeError that would result from
+    `ctypes.windll` not existing on Linux/macOS.
+    """
     if sys.platform != "win32":
-        raise NotImplementedError(
-            "Credential Manager API is Windows-only. For cross-platform secret "
+        raise SecretSourceError(
+            "CredMan backend requires Windows. For cross-platform secret "
             "storage, use recto.secrets.{keychain,secretsvc,vault,aws,env}."
         )
 
@@ -278,7 +290,7 @@ class CredManSource(SecretSource):
 
     Args:
         service: Logical service name. Must not contain ':'.
-        platform_check: When True (default), raise NotImplementedError on
+        platform_check: When True (default), raise SecretSourceError on
             non-Windows platforms. Tests pass platform_check=False and
             override the four _* methods to back them with an in-memory
             dict; see tests/test_secrets_credman.py.
@@ -286,8 +298,8 @@ class CredManSource(SecretSource):
 
     def __init__(self, service: str, *, platform_check: bool = True):
         if platform_check and sys.platform != "win32":
-            raise NotImplementedError(
-                "CredManSource only works on Windows. For cross-platform secret "
+            raise SecretSourceError(
+                "CredMan backend requires Windows. For cross-platform secret "
                 "storage, use recto.secrets.{keychain,secretsvc,vault,aws,env}."
             )
         if not service:
@@ -364,19 +376,4 @@ class CredManSource(SecretSource):
         self.write(secret_name, new_value)
 
     # ------------------------------------------------------------------
-    # Lower-level platform calls. Separated so tests on non-Windows can
-    # subclass and override these with in-memory backed implementations
-    # without needing a ctypes mock.
-    # ------------------------------------------------------------------
-
-    def _read_blob(self, target: str) -> str:
-        return _win_read_blob(target)
-
-    def _write_blob(self, target: str, value: str, comment: str = "") -> None:
-        _win_write_blob(target, value, comment=comment)
-
-    def _delete_blob(self, target: str) -> None:
-        _win_delete_blob(target)
-
-    def _list_targets(self, filter_pattern: str) -> list[str]:
-        return _win_list_targets(filter_pattern)
+    # Lower-level 

@@ -129,8 +129,26 @@ class TestParseTarget:
 class TestConstructor:
     @pytest.mark.skipif(sys.platform == "win32", reason="Linux/macOS only")
     def test_raises_on_non_windows_by_default(self) -> None:
-        with pytest.raises(NotImplementedError):
+        # Per Darwin's 2026-04-25 IM-update suggestion: should raise
+        # SecretSourceError (the canonical secret-backend error type),
+        # not NotImplementedError or a bare AttributeError. This lets
+        # the launcher's `except SecretSourceError` path catch it
+        # uniformly with other backend failures.
+        with pytest.raises(SecretSourceError) as exc_info:
             CredManSource("myservice")
+        assert "Windows" in str(exc_info.value)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Linux/macOS only")
+    def test_ensure_windows_helper_raises_secret_source_error(self) -> None:
+        # The internal _ensure_windows() guard should also raise
+        # SecretSourceError — defense in depth for the platform_check=False
+        # path where a caller bypasses the constructor guard but a real
+        # _win_* function still gets reached.
+        from recto.secrets.credman import _ensure_windows
+
+        with pytest.raises(SecretSourceError) as exc_info:
+            _ensure_windows()
+        assert "Windows" in str(exc_info.value)
 
     def test_test_mode_works_on_any_platform(self) -> None:
         src = CredManSource("myservice", platform_check=False)
@@ -283,30 +301,4 @@ class TestEndToEnd:
         write -> list -> fetch -> rotate -> delete."""
         src = FakeCredManSource("myservice")
 
-        # No secrets installed yet.
-        assert src.list_names() == []
-
-        # Install MY_API_KEY + WEBHOOK_TOKEN.
-        src.write("MY_API_KEY", "key-v1", comment="example API bearer")
-        src.write("WEBHOOK_TOKEN", "push-token-v1")
-
-        # List shows both.
-        assert src.list_names() == ["MY_API_KEY", "WEBHOOK_TOKEN"]
-
-        # Fetch returns DirectSecret with current values.
-        a = src.fetch("MY_API_KEY", {})
-        b = src.fetch("WEBHOOK_TOKEN", {})
-        assert isinstance(a, DirectSecret)
-        assert isinstance(b, DirectSecret)
-        assert a.value == "key-v1"
-        assert b.value == "push-token-v1"
-
-        # Rotate MY_API_KEY.
-        src.rotate("MY_API_KEY", "key-v2")
-        assert src.fetch("MY_API_KEY", {}).value == "key-v2"  # type: ignore[union-attr]
-
-        # Delete WEBHOOK_TOKEN.
-        src.delete("WEBHOOK_TOKEN")
-        assert src.list_names() == ["MY_API_KEY"]
-        with pytest.raises(SecretNotFoundError):
-            src.fetch("WEBHOOK_TOKEN", {})
+        # No secrets ins

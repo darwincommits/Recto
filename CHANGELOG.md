@@ -34,6 +34,60 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - `recto.launcher.run` lives in `recto/_launcher_run.py` and is re-exported from `recto.launcher`. Split out to dodge a Cowork cross-mount Write-tool truncation we hit when launcher.py exceeded ~19KB. Public import surface (`from recto.launcher import run`) is unchanged.
 
-### Notes for next-up v0.1 work
-- `recto.cli` exposes `recto launch <yaml>`, `recto credman {set,list,delete}`, `recto status`, `recto migrate-from-nssm`.
-- Delete `recto/_launcher_part2.py` (left behind during the comms work; can't be removed via the Cowork sandbox bash, see the Gotchas note in CLAUDE.md).
+- `recto.cli` argparse-based command-line interface. Subcommands:
+  - `recto launch <yaml> [--once]` — load + validate the YAML and call
+    `recto.launcher.run` (or `launch` with `--once`). Returns the
+    child's exit code; YAML errors surface as exit 1 with the
+    aggregated `ConfigValidationError` message on stderr.
+  - `recto credman set <service> <name> [--value V]` — install a
+    secret in Windows Credential Manager. Without `--value`, prompts
+    via `getpass` so the value never appears on the command line and
+    is not echoed. Empty prompt input is refused; `--value ""` is the
+    explicit override for "I really mean empty".
+  - `recto credman list <service>` — list installed secret names for
+    a service, sorted, one per line. Empty inventory is exit 0 (not
+    an error).
+  - `recto credman delete <service> <name>` — remove an installed
+    secret. Exit 1 with a clear message if the credential doesn't
+    exist.
+  - `recto status <service>` — shell out to `nssm status <service>`
+    and print the result. Exit 0 on `SERVICE_RUNNING`, 1 otherwise —
+    suitable as a poll target.
+  - `recto migrate-from-nssm <service> [--yaml-out path]
+    [--python-exe path] [--dry-run]` — read NSSM config via `nssm get`
+    for every canonical field, install AppEnvironmentExtra entries to
+    Credential Manager, write a generated service.yaml with a
+    `secrets:` block referencing those credman targets, retarget NSSM
+    AppPath at `python.exe`, set AppParameters to
+    `-m recto launch <yaml>`, and reset AppEnvironmentExtra so the
+    plaintext entries are gone. `--dry-run` prints the plan with secret
+    values masked as `<redacted>` and makes no changes. Idempotent:
+    re-running on a migrated service is a no-op (CredWriteW upserts;
+    NSSM `set` is idempotent on identical values).
+- `recto.nssm.NssmClient` thin wrapper around `nssm.exe` for the
+  status / get / set / reset operations the CLI needs. Bytes-mode
+  subprocess capture with UTF-16-LE -> UTF-8 -> cp1252 decode fallback
+  (NSSM emits wide strings on Windows; some patched builds use UTF-8).
+  All shell-outs flow through a single `runner` callable so tests
+  inject a stub. `NssmConfig` snapshot dataclass + `split_environment_extra`
+  parser for the multi-line `KEY=value` block.
+- `recto/__main__.py` so `python -m recto …` mirrors the
+  console-script entry point at `recto = recto.cli:main`.
+- Test suite grew to 239 (+50 from v0.1 cli work): 22 new tests in
+  `tests/test_nssm.py` covering AppEnvironmentExtra parsing,
+  status/get/set/reset, get_all field aggregation, service-not-found
+  vs generic-error split, and decoder edge cases; 28 new tests in
+  `tests/test_cli.py` covering argparse shape per subcommand,
+  launch dispatch + invalid-config + missing-file paths, credman
+  set/list/delete with FakeCredManSource, status running/stopped/
+  nssm-missing, and migrate-from-nssm dry-run + apply (with secret
+  redaction in plan output, NSSM retarget assertions, and round-trip
+  parsing of the generated YAML).
+
+### Notes for next-up work
+- v0.1 is now feature-complete per ROADMAP. Next: v0.2 operational
+  maturity (admin UI, GitOps reconcile, Job Object resource limits,
+  OpenTelemetry traces, TCP + exec health checks, pytest-cov >80%).
+- Delete `recto/_launcher_part2.py` (left behind during the comms
+  work; can't be removed via the Cowork sandbox bash, see the Gotchas
+  note in CLAUDE.md).

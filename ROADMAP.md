@@ -2,9 +2,13 @@
 
 Phased shipping plan. Each phase is a tagged release; the architecture seam (`SecretSource` ABC, YAML schema) is locked at v0.1 so later phases slot in without breaking earlier consumers.
 
+## Cadence note
+
+Original timeframes (April-May 2026 → late-2026/2027) were drafted before AI-assisted development cadence was factored in. The actual pace has compressed v0.1 to a single development sprint; the targets below reflect what we're now shipping against. Compressed milestones assume the operator stays available for review + push, not full-time AI work; if review windows lengthen, milestones slip linearly.
+
 ## v0.1 — "Don't leak secrets to the Windows registry"
 
-**Target:** April-May 2026.
+**Target:** end of April 2026 (in flight; cli is the last module).
 
 **Scope:**
 - `recto.secrets.base` — `SecretSource` ABC + `SecretMaterial` sealed type (`DirectSecret` + `SigningCapability` declared even though only `DirectSecret` ships).
@@ -27,7 +31,7 @@ Phased shipping plan. Each phase is a tagged release; the architecture seam (`Se
 
 ## v0.2 — "Operational maturity"
 
-**Target:** Within a month of v0.1 ship.
+**Target:** mid-May 2026 (~2-3 weeks after v0.1).
 
 **Scope:**
 - Web admin UI at `127.0.0.1:5050`, exposed via Cloudflare Tunnel (or any reverse proxy you bring), gated by Cloudflare Access or your auth layer of choice. Tabs: Status, Logs (live tail), Secrets (names only, masked values, rotate button), Config (read-only YAML render), Restart History.
@@ -41,7 +45,7 @@ Phased shipping plan. Each phase is a tagged release; the architecture seam (`Se
 
 ## v0.3 — "Multi-platform secret backends"
 
-**Target:** Q3 2026.
+**Target:** mid-June 2026 (~3-4 weeks after v0.2).
 
 **Scope:**
 - `recto.secrets.keychain` — macOS Keychain via `/usr/bin/security` CLI (stdlib only).
@@ -55,7 +59,7 @@ Phased shipping plan. Each phase is a tagged release; the architecture seam (`Se
 
 ## v0.4 — "Secrets that never sit on the server"
 
-**Target:** Late 2026 / 2027. The marquee phase.
+**Target:** August 2026 (~6-8 weeks after v0.3). The marquee phase. The substantial open architectural questions below mean this estimate is the softest in the roadmap; expect it to drift if any of phone-availability recovery, latency model, or post-quantum hardware support take longer than scoped. Gating dependency for downstream consumer work.
 
 **Scope:** Hardware-enclave secret backend. Secrets live in a phone's Secure Enclave or StrongBox; never touch the server's filesystem. Each cryptographic operation (sign / decrypt) is biometric-gated on the phone. Designed to be quantum-resistant from the start (NIST-finalized PQ signature schemes — Dilithium / Falcon / SPHINCS+ — when hardware support catches up; classical ECDSA in-enclave as the bridge).
 

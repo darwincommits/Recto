@@ -24,8 +24,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
+from recto.adminui import AdminUIServer, EventBuffer
 from recto.comms import CommsDispatcher
 from recto.config import (
+    AdminUISpec,
     HealthzSpec,
     ResourceLimitsSpec,
     ServiceConfig,
@@ -44,6 +46,8 @@ from recto.secrets import (
 from recto.telemetry import TelemetryClient
 
 __all__ = [
+    "AdminUIFactory",
+    "BufferFactory",
     "DispatcherFactory",
     "JoblimitFactory",
     "LauncherError",
@@ -68,6 +72,17 @@ TelemetryFactory = Callable[[TelemetrySpec], TelemetryClient]
 """(spec.telemetry) -> TelemetryClient. Production uses TelemetryClient
 directly; tests inject a stub that records start_run / record_event /
 end_run calls. No-op when telemetry.enabled=False (the default)."""
+
+BufferFactory = Callable[[], EventBuffer]
+"""() -> EventBuffer. Production uses EventBuffer with default capacity;
+tests pass a smaller-capacity stub to verify ring behavior."""
+
+AdminUIFactory = Callable[
+    [AdminUISpec, str, EventBuffer, ServiceConfig], AdminUIServer
+]
+"""(spec.admin_ui, service_name, buffer, config) -> AdminUIServer.
+Construction does NOT bind; .start() does. Tests inject a stub that
+records start/stop without spawning a real HTTP server."""
 """(spec.resource_limits) -> JobLimit. Production uses JobLimit directly;
 tests inject a stub that records attach() / close() calls without
 touching Win32. Constructed once per spawn (per-spawn lifetime, parallels
@@ -150,6 +165,8 @@ def launch(
     dispatcher_factory: DispatcherFactory | None = None,
     joblimit_factory: JoblimitFactory = JobLimit,
     telemetry_factory: TelemetryFactory = TelemetryClient,
+    buffer_factory: BufferFactory = EventBuffer,
+    adminui_factory: AdminUIFactory = AdminUIServer,
 ) -> int:
     """Run the supervised child once. Returns the child's exit code."""
     if sources is None:
@@ -162,9 +179,19 @@ def launch(
             "recto.restart.policy": config.spec.restart.policy,
         },
     )
+    buffer = buffer_factory()
+    adminui = adminui_factory(
+        config.spec.admin_ui,
+        service_name=config.metadata.name,
+        buffer=buffer,
+        config=config,
+    )
+    adminui.start()
     rc = 0
     try:
-        with _bracket_lifecycle(config, sources, telemetry=telemetry):
+        with _bracket_lifecycle(
+            config, sources, telemetry=telemetry, buffer=buffer
+        ):
             env = build_child_env(config.spec, sources, base_env=base_env)
             dispatcher = _build_dispatcher(config, env, dispatcher_factory)
             rc = _spawn_and_wait(
@@ -177,9 +204,11 @@ def launch(
                 dispatcher=dispatcher,
                 joblimit_factory=joblimit_factory,
                 telemetry=telemetry,
+                buffer=buffer,
             )
             return rc
     finally:
+        adminui.stop()
         telemetry.end_run(rc)
         telemetry.shutdown()
 
@@ -195,6 +224,7 @@ def _bracket_lifecycle(
     sources: Mapping[str, SecretSource],
     *,
     telemetry: TelemetryClient | None = None,
+    buffer: EventBuffer | None = None,
 ) -> Iterator[None]:
     """init() lifecycle-stateful sources before, teardown() after."""
     initialized: list[SecretSource] = []
@@ -214,6 +244,7 @@ def _bracket_lifecycle(
                     "source.teardown_failed",
                     {"source": src.name, "error": type(exc).__name__},
                     telemetry=telemetry,
+                    buffer=buffer,
                 )
 
 
@@ -245,6 +276,7 @@ def _spawn_and_wait(
     dispatcher: CommsDispatcher | None = None,
     joblimit_factory: JoblimitFactory = JobLimit,
     telemetry: TelemetryClient | None = None,
+    buffer: EventBuffer | None = None,
 ) -> int:
     """Spawn one child with the given env, wait for exit OR healthz unhealthy.
 
@@ -267,6 +299,7 @@ def _spawn_and_wait(
         },
         dispatcher=dispatcher,
         telemetry=telemetry,
+        buffer=buffer,
     )
 
     proc = popen(cmd, env=dict(env), cwd=cwd)
@@ -318,6 +351,7 @@ def _spawn_and_wait(
         {"returncode": rc, "healthz_signaled": healthz_signaled},
         dispatcher=dispatcher,
         telemetry=telemetry,
+        buffer=buffer,
     )
     return rc
 
@@ -352,8 +386,9 @@ def _emit_event(
     *,
     dispatcher: CommsDispatcher | None = None,
     telemetry: TelemetryClient | None = None,
+    buffer: EventBuffer | None = None,
 ) -> None:
-    """Structured stdout log line + optional webhook dispatch + optional OTel."""
+    """Structured stdout log line + optional webhook + OTel + admin-UI buffer."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),  # noqa: UP017
         "service": config.metadata.name,
@@ -376,45 +411,8 @@ def _emit_event(
         dispatcher.dispatch(kind, ctx)
     if telemetry is not None:
         telemetry.record_event(kind, ctx)
-
-
-# Restart-loop entry point lives in _launcher_run to dodge the
-# cross-mount Write-tool truncation. Re-exported under recto.launcher.run
-# so callers don't need to know about the split.
-from recto._launcher_run import run  # noqa: E402, F401
-
-
-def _emit_event(
-    config: ServiceConfig,
-    kind: str,
-    ctx: dict[str, Any],
-    *,
-    dispatcher: CommsDispatcher | None = None,
-    telemetry: TelemetryClient | None = None,
-) -> None:
-    """Structured stdout log line + optional webhook dispatch + optional OTel."""
-    record = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),  # noqa: UP017
-        "service": config.metadata.name,
-        "kind": kind,
-        "ctx": ctx,
-    }
-    try:
-        line = json.dumps(record, default=str)
-    except (TypeError, ValueError) as exc:
-        line = json.dumps(
-            {
-                "ts": record["ts"],
-                "service": record["service"],
-                "kind": "internal.event_serialize_failed",
-                "ctx": {"original_kind": kind, "error": str(exc)},
-            }
-        )
-    print(line, file=sys.stdout, flush=True)
-    if dispatcher is not None:
-        dispatcher.dispatch(kind, ctx)
-    if telemetry is not None:
-        telemetry.record_event(kind, ctx)
+    if buffer is not None:
+        buffer.append(kind, ctx)
 
 
 # Restart-loop entry point lives in _launcher_run to dodge the

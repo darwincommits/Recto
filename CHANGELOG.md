@@ -7,6 +7,67 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2 adminui (read-only web admin UI scaffold)
+- `recto.adminui` module: `EventBuffer` (thread-safe ring buffer of
+  recent lifecycle events, default capacity 1000), `AdminUIServer`
+  (stdlib-only `ThreadingHTTPServer` wrapper), embedded single-file
+  HTML index page (`INDEX_HTML`).
+- Three read-only JSON endpoints:
+  - `GET /api/status` — service name, healthz/restart shape, launcher
+    uptime, current event count.
+  - `GET /api/events?kind=...&limit=N` — recent lifecycle events from
+    the in-memory ring buffer; optional kind filter and limit (capped
+    at 2000).
+  - `GET /api/restart-history?limit=N` — pre-filtered events of kind
+    `child.exit` / `restart.attempt` / `max_attempts_reached` /
+    `run.final_exit` (capped at 1000).
+- `GET /` serves a self-contained HTML page that polls those three
+  endpoints every 5 seconds. Three tabs: Status, Events, Restart
+  History. No external CDN dependencies for the UI itself; only the
+  fonts.googleapis stylesheet (operators in air-gapped environments
+  can fork the page or ignore the font fallback).
+- Bind defaults to `127.0.0.1:5050`. Operators expose externally via
+  Cloudflare Tunnel + Cloudflare Access (or any reverse-proxy auth
+  layer). Recto trusts every connection that reaches it; auth is the
+  proxy's job. Soft-fails on bind errors (port in use, permission
+  denied) — logs a warning via `emit_failure` and skips the server
+  rather than breaking the launcher.
+- `recto.launcher.AdminUIFactory` and `BufferFactory` callable
+  aliases plus `adminui_factory` / `buffer_factory` kwargs on
+  `launch()` / `run()`. Production passes the real `AdminUIServer`
+  and `EventBuffer`; tests inject stubs that record `start` / `stop`
+  calls without spawning an HTTP server.
+- Test suite grew to 376 (+24 from v0.2 telemetry): 21 new tests in
+  `tests/test_adminui.py` covering EventBuffer (append, ring
+  behavior, kind filter, thread-safety smoke), AdminUIServer
+  lifecycle (disabled-skip, idempotent stop, soft-fail on bind
+  collision), HTTP routes (`/`, `/api/status`, `/api/events`,
+  `/api/restart-history`, 404 for unknown paths), and the embedded
+  HTML index. 3 new tests in `tests/test_launcher.py::TestAdminUIWiring`
+  covering the launcher integration: factory construction +
+  start/stop bracketing, buffer receives `child.spawn` + `child.exit`
+  events, stop() runs even when popen raises.
+
+### Changed — v0.2 adminui
+- `recto.launcher._emit_event` now optionally appends to a third
+  sink (the EventBuffer) after the stdout JSON / dispatcher /
+  telemetry sinks. All four sinks are independent and best-effort.
+- `recto.launcher.launch()` and `recto._launcher_run.run()` always
+  build an EventBuffer (cheap, ~1KB) and an AdminUIServer; the
+  server only binds when `spec.admin_ui.enabled` is True. Stop is
+  always called in the finally so the daemon thread joins cleanly
+  even if the supervised child failed to spawn.
+
+### Deferred (post-v0.2)
+- `POST /api/secrets/<name>/rotate` — write op, needs careful auth.
+- `GET /api/secrets` — names-only inventory; needs CredManSource
+  reach-through.
+- `GET /api/config` — needs a secret-redaction pass on the YAML
+  render before it can ship.
+- Server-Sent Events for live log tail (currently the UI polls every
+  5 seconds, which is fine for human use but heavy if many tabs are
+  open).
+
 ### Added — v0.2 telemetry (OpenTelemetry traces)
 - `recto.telemetry` module: `TelemetryClient` wrapping the OpenTelemetry
   tracer, `coerce_attribute_value` helper for converting Python values

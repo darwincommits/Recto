@@ -1414,3 +1414,122 @@ class TestTelemetryWiring:
             telemetry_factory=_BoomTelemetry,
         )
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# AdminUI integration (v0.2)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAdminUI:
+    """Drop-in AdminUIServer stand-in that records lifecycle calls."""
+
+    def __init__(
+        self,
+        spec: object,
+        *,
+        service_name: str,
+        buffer: object,
+        config: object,
+        emit_failure: object | None = None,
+    ) -> None:
+        self.spec = spec
+        self.service_name = service_name
+        self.buffer = buffer
+        self.config = config
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class TestAdminUIWiring:
+    def test_launch_constructs_starts_stops_adminui(self) -> None:
+        """Launch() builds an AdminUI via factory, starts before bracket,
+        stops in finally."""
+        config = make_config()
+        recorded: list[_RecordingAdminUI] = []
+
+        def factory(spec: object, **kw: object) -> _RecordingAdminUI:
+            ui = _RecordingAdminUI(spec, **kw)
+            recorded.append(ui)
+            return ui
+
+        popen_stub, _ = make_popen_stub(returncode=0)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            adminui_factory=factory,
+        )
+        assert rc == 0
+        assert len(recorded) == 1
+        ui = recorded[0]
+        assert ui.start_calls == 1
+        assert ui.stop_calls == 1
+        # Factory got the right wiring -- service_name from metadata,
+        # buffer is an EventBuffer (we verify the type via duck-test:
+        # it has an append method).
+        assert ui.service_name == "myservice"
+        assert hasattr(ui.buffer, "append")
+        assert hasattr(ui.buffer, "recent")
+
+    def test_buffer_receives_lifecycle_events(self) -> None:
+        """The same EventBuffer the adminui factory got should also be
+        the sink that _emit_event writes to. Confirms the wiring loop:
+        launcher -> _emit_event -> buffer -> /api/events."""
+        config = make_config()
+        captured_buffer: list[object] = []
+
+        def factory(spec: object, **kw: object) -> _RecordingAdminUI:
+            captured_buffer.append(kw["buffer"])
+            return _RecordingAdminUI(spec, **kw)
+
+        popen_stub, _ = make_popen_stub(returncode=0)
+        launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            adminui_factory=factory,
+        )
+        # The buffer should contain both child.spawn and child.exit
+        # events from the run.
+        buf = captured_buffer[0]
+        events = buf.recent()  # type: ignore[attr-defined]
+        kinds = [e["kind"] for e in events]
+        assert "child.spawn" in kinds
+        assert "child.exit" in kinds
+
+    def test_adminui_stop_called_even_on_exception(self) -> None:
+        """If anything inside the try block raises, stop() must still
+        run in the finally."""
+        config = make_config()
+        recorded: list[_RecordingAdminUI] = []
+
+        def factory(spec: object, **kw: object) -> _RecordingAdminUI:
+            ui = _RecordingAdminUI(spec, **kw)
+            recorded.append(ui)
+            return ui
+
+        # Popen that raises -- spawn fails before the supervised loop
+        # even starts.
+        def boom_popen(*_a: object, **_kw: object) -> object:
+            raise RuntimeError("popen failed")
+
+        with pytest.raises(RuntimeError, match="popen failed"):
+            launch(
+                config,
+                sources={},
+                popen=boom_popen,
+                base_env={},
+                adminui_factory=factory,
+            )
+        # AdminUI start() ran before the spawn, stop() ran in finally.
+        assert recorded[0].start_calls == 1
+        assert recorded[0].stop_calls == 1

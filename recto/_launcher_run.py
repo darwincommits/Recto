@@ -12,6 +12,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 
+from recto.adminui import AdminUIServer, EventBuffer
 from recto.config import ServiceConfig
 from recto.healthz import HealthzProbe
 from recto.joblimit import JobLimit
@@ -35,6 +36,8 @@ def run(
     dispatcher_factory: Callable[..., object] | None = None,
     joblimit_factory: Callable[..., JobLimit] = JobLimit,
     telemetry_factory: Callable[..., TelemetryClient] = TelemetryClient,
+    buffer_factory: Callable[[], EventBuffer] = EventBuffer,
+    adminui_factory: Callable[..., AdminUIServer] = AdminUIServer,
 ) -> int:
     """Run the supervised child with the configured restart policy.
 
@@ -44,7 +47,9 @@ def run(
       re-spawns per restart policy. Long-lived backends (Vault session,
       hardware-enclave handle) stay open across restarts. The
       TelemetryClient also lives across the whole loop -- one OTel
-      span covers every restart attempt.
+      span covers every restart attempt. Likewise the EventBuffer +
+      AdminUIServer cover the whole loop, so /api/events shows the
+      full lifecycle history rather than just the latest spawn.
 
     Returns the LAST child invocation's exit code, whether the policy
     decided "no restart" or max_attempts_reached fired.
@@ -71,9 +76,19 @@ def run(
             "recto.restart.policy": config.spec.restart.policy,
         },
     )
+    buffer = buffer_factory()
+    adminui = adminui_factory(
+        config.spec.admin_ui,
+        service_name=config.metadata.name,
+        buffer=buffer,
+        config=config,
+    )
+    adminui.start()
     last_rc = 0
     try:
-        with _bracket_lifecycle(config, sources, telemetry=telemetry):
+        with _bracket_lifecycle(
+            config, sources, telemetry=telemetry, buffer=buffer
+        ):
             env = build_child_env(config.spec, sources, base_env=base_env)
             dispatcher = _build_dispatcher(config, env, dispatcher_factory)
             attempt = 0
@@ -88,6 +103,7 @@ def run(
                     dispatcher=dispatcher,
                     joblimit_factory=joblimit_factory,
                     telemetry=telemetry,
+                    buffer=buffer,
                 )
                 if not should_restart(last_rc, config.spec.restart):
                     _emit_event(
@@ -96,6 +112,7 @@ def run(
                         {"returncode": last_rc, "restart_attempts": attempt},
                         dispatcher=dispatcher,
                         telemetry=telemetry,
+                        buffer=buffer,
                     )
                     return last_rc
                 attempt += 1
@@ -111,6 +128,7 @@ def run(
                         },
                         dispatcher=dispatcher,
                         telemetry=telemetry,
+                        buffer=buffer,
                     )
                     return last_rc
                 _emit_event(
@@ -124,8 +142,10 @@ def run(
                     },
                     dispatcher=dispatcher,
                     telemetry=telemetry,
+                    buffer=buffer,
                 )
                 sleep(delay)
     finally:
+        adminui.stop()
         telemetry.end_run(last_rc)
         telemetry.shutdown()

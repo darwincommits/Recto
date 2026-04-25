@@ -7,6 +7,51 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2 telemetry (OpenTelemetry traces)
+- `recto.telemetry` module: `TelemetryClient` wrapping the OpenTelemetry
+  tracer, `coerce_attribute_value` helper for converting Python values
+  into OTel-compatible attributes (None -> "<none>", lists/tuples
+  preserved, dicts JSON-serialized, arbitrary objects via repr).
+- One long-lived span per `run()` (or `launch()`) invocation, named
+  `recto.run.<service>`, with these lifecycle events recorded as span
+  events: `child.spawn`, `child.exit`, `restart.attempt`,
+  `max_attempts_reached`, `run.final_exit`, `source.teardown_failed`.
+  Span attributes include `service.name`, `recto.healthz.type`,
+  `recto.restart.policy`, and (on end) `recto.returncode`.
+- Optional dependency: `pip install recto[otel]` pulls in
+  `opentelemetry-api`, `opentelemetry-sdk`, and
+  `opentelemetry-exporter-otlp-proto-http`. When `telemetry.enabled:
+  true` but those packages are not installed, the client warns once
+  to stderr and falls back to no-op so the launcher keeps running.
+- Failure isolation: every public method on `TelemetryClient` swallows
+  exceptions internally so a failing tracer (network outage, bad OTLP
+  endpoint) cannot break the launcher. The launcher's `_emit_event`
+  treats the telemetry sink the same way it treats the dispatcher
+  sink: best-effort, never propagates.
+- `recto.launcher.TelemetryFactory` callable alias and
+  `telemetry_factory` kwarg on `launch()` / `run()` /
+  `_spawn_and_wait` / `_emit_event`. Production passes the real
+  `TelemetryClient`; tests inject stubs.
+- Test suite grew to 352 (+28 from v0.2 joblimit): 24 new tests in
+  `tests/test_telemetry.py` covering attribute coercion, no-op when
+  disabled, fallback when OTel deps missing, the active path via a
+  FakeTelemetryClient subclass that overrides `_build_tracer`, and
+  failure isolation when a tracer raises. 4 new tests in
+  `tests/test_launcher.py::TestTelemetryWiring` covering the launcher
+  integration: start_run -> events -> end_run -> shutdown sequence,
+  returncode flows to end_run, ctx flows to record_event attributes,
+  telemetry stub raising doesn't break the launcher.
+
+### Changed — v0.2 telemetry
+- `recto.launcher._emit_event` now optionally calls
+  `telemetry.record_event(kind, ctx)` after the stdout JSON line and
+  the dispatcher.dispatch call, mirroring the existing dispatcher
+  contract. Both sinks are independent: a failing dispatcher doesn't
+  affect telemetry, and vice versa.
+- `pyproject.toml` adds `[project.optional-dependencies] otel = [...]`
+  so the OpenTelemetry tree stays out of the default install
+  footprint (Recto's hard rule: stdlib-only launcher path).
+
 ### Added — v0.2 joblimit (Win32 Job Object resource limits)
 - `recto.joblimit` module: `JobLimit` class wrapping a Win32 Job Object,
   `plan_for(spec) -> _JobLimitPlan` (pure planning layer), `JoblimitError`

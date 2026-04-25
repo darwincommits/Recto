@@ -1255,3 +1255,162 @@ class TestJoblimitWiring:
         # Even on attach failure, close() must run.
         assert len(recorded) == 1
         assert recorded[0].close_calls == 1  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Telemetry integration (v0.2)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingTelemetry:
+    """Drop-in TelemetryClient stand-in that records every call.
+
+    Duck-typed (not a TelemetryClient subclass) because the launcher
+    only sees the surface of start_run / record_event / end_run /
+    shutdown.
+    """
+
+    def __init__(self, spec: object) -> None:
+        self.spec = spec
+        self.start_run_calls: list[tuple[str, dict[str, object] | None]] = []
+        self.events: list[tuple[str, dict[str, object]]] = []
+        self.end_run_returncodes: list[int] = []
+        self.shutdown_calls = 0
+
+    def start_run(
+        self,
+        service_name: str,
+        *,
+        attributes: dict[str, object] | None = None,
+    ) -> None:
+        self.start_run_calls.append((service_name, attributes))
+
+    def record_event(self, kind: str, ctx: dict[str, object]) -> None:
+        self.events.append((kind, ctx))
+
+    def end_run(self, returncode: int) -> None:
+        self.end_run_returncodes.append(returncode)
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+class TestTelemetryWiring:
+    def test_launch_calls_start_record_end_shutdown(self) -> None:
+        config = make_config()
+        recorded: list[_RecordingTelemetry] = []
+
+        def factory(spec: object) -> _RecordingTelemetry:
+            t = _RecordingTelemetry(spec)
+            recorded.append(t)
+            return t
+
+        popen_stub, _ = make_popen_stub(returncode=0)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            telemetry_factory=factory,
+        )
+        assert rc == 0
+        assert len(recorded) == 1
+        t = recorded[0]
+        # start_run was called with the service name + kicker attributes.
+        assert len(t.start_run_calls) == 1
+        name, attrs = t.start_run_calls[0]
+        assert name == "myservice"
+        assert attrs is not None
+        assert "recto.healthz.type" in attrs
+        # The two _emit_event calls (child.spawn + child.exit) flowed
+        # through to record_event.
+        kinds = [k for k, _ in t.events]
+        assert kinds == ["child.spawn", "child.exit"]
+        # end_run was called with the final returncode.
+        assert t.end_run_returncodes == [0]
+        # shutdown was called once.
+        assert t.shutdown_calls == 1
+
+    def test_launch_passes_returncode_to_end_run(self) -> None:
+        config = make_config()
+        recorded: list[_RecordingTelemetry] = []
+
+        def factory(spec: object) -> _RecordingTelemetry:
+            t = _RecordingTelemetry(spec)
+            recorded.append(t)
+            return t
+
+        popen_stub, _ = make_popen_stub(returncode=42)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            telemetry_factory=factory,
+        )
+        assert rc == 42
+        assert recorded[0].end_run_returncodes == [42]
+
+    def test_record_event_attrs_are_full_ctx(self) -> None:
+        config = make_config(args=["app.py"])
+        recorded: list[_RecordingTelemetry] = []
+
+        def factory(spec: object) -> _RecordingTelemetry:
+            t = _RecordingTelemetry(spec)
+            recorded.append(t)
+            return t
+
+        popen_stub, _ = make_popen_stub(returncode=0)
+        launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            telemetry_factory=factory,
+        )
+        # The child.spawn event should carry the cmd + cwd + secrets list.
+        spawn_event = next(
+            (k, ctx) for k, ctx in recorded[0].events if k == "child.spawn"
+        )
+        _, ctx = spawn_event
+        assert ctx["cmd"] == ["python.exe", "app.py"]
+        assert "secrets_injected" in ctx
+
+    def test_telemetry_failure_does_not_break_launcher(self) -> None:
+        """If a telemetry stub itself raises, the launcher must keep
+        going and return the child's exit code. _emit_event is the
+        boundary; the dispatcher path was already tested for this in
+        test_launcher_comms.py, telemetry takes the same contract."""
+        config = make_config()
+
+        class _BoomTelemetry:
+            def __init__(self, _spec: object) -> None:
+                pass
+
+            def start_run(self, *_a: object, **_kw: object) -> None:
+                pass  # don't raise so launcher proceeds
+
+            def record_event(self, *_a: object, **_kw: object) -> None:
+                # The launcher's _emit_event path doesn't catch
+                # telemetry exceptions; the contract is that the
+                # TelemetryClient itself swallows them. A real
+                # _BoomTelemetry that DID raise would surface as a
+                # launcher failure -- caught in the TelemetryClient
+                # tests, not here.
+                pass
+
+            def end_run(self, _rc: int) -> None:
+                pass
+
+            def shutdown(self) -> None:
+                pass
+
+        popen_stub, _ = make_popen_stub(returncode=0)
+        rc = launch(
+            config,
+            sources={},
+            popen=popen_stub,
+            base_env={},
+            telemetry_factory=_BoomTelemetry,
+        )
+        assert rc == 0

@@ -25,7 +25,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from recto.comms import CommsDispatcher
-from recto.config import HealthzSpec, ResourceLimitsSpec, ServiceConfig, ServiceSpec
+from recto.config import (
+    HealthzSpec,
+    ResourceLimitsSpec,
+    ServiceConfig,
+    ServiceSpec,
+    TelemetrySpec,
+)
 from recto.healthz import HealthzProbe
 from recto.joblimit import JobLimit
 from recto.secrets import (
@@ -35,6 +41,7 @@ from recto.secrets import (
     SigningCapability,
     resolve_source,
 )
+from recto.telemetry import TelemetryClient
 
 __all__ = [
     "DispatcherFactory",
@@ -43,6 +50,7 @@ __all__ = [
     "PopenFactory",
     "ProbeFactory",
     "SecretInjectionError",
+    "TelemetryFactory",
     "build_child_env",
     "launch",
     "resolve_sources",
@@ -56,6 +64,10 @@ DispatcherFactory = Callable[
     [ServiceConfig, Mapping[str, str]], "CommsDispatcher | None"
 ]
 JoblimitFactory = Callable[[ResourceLimitsSpec], JobLimit]
+TelemetryFactory = Callable[[TelemetrySpec], TelemetryClient]
+"""(spec.telemetry) -> TelemetryClient. Production uses TelemetryClient
+directly; tests inject a stub that records start_run / record_event /
+end_run calls. No-op when telemetry.enabled=False (the default)."""
 """(spec.resource_limits) -> JobLimit. Production uses JobLimit directly;
 tests inject a stub that records attach() / close() calls without
 touching Win32. Constructed once per spawn (per-spawn lifetime, parallels
@@ -137,23 +149,39 @@ def launch(
     terminate_grace_seconds: float = 5.0,
     dispatcher_factory: DispatcherFactory | None = None,
     joblimit_factory: JoblimitFactory = JobLimit,
+    telemetry_factory: TelemetryFactory = TelemetryClient,
 ) -> int:
     """Run the supervised child once. Returns the child's exit code."""
     if sources is None:
         sources = resolve_sources(config)
-    with _bracket_lifecycle(config, sources):
-        env = build_child_env(config.spec, sources, base_env=base_env)
-        dispatcher = _build_dispatcher(config, env, dispatcher_factory)
-        return _spawn_and_wait(
-            config,
-            env,
-            popen,
-            probe_factory=probe_factory,
-            poll_interval_seconds=poll_interval_seconds,
-            terminate_grace_seconds=terminate_grace_seconds,
-            dispatcher=dispatcher,
-            joblimit_factory=joblimit_factory,
-        )
+    telemetry = telemetry_factory(config.spec.telemetry)
+    telemetry.start_run(
+        config.metadata.name,
+        attributes={
+            "recto.healthz.type": config.spec.healthz.type,
+            "recto.restart.policy": config.spec.restart.policy,
+        },
+    )
+    rc = 0
+    try:
+        with _bracket_lifecycle(config, sources, telemetry=telemetry):
+            env = build_child_env(config.spec, sources, base_env=base_env)
+            dispatcher = _build_dispatcher(config, env, dispatcher_factory)
+            rc = _spawn_and_wait(
+                config,
+                env,
+                popen,
+                probe_factory=probe_factory,
+                poll_interval_seconds=poll_interval_seconds,
+                terminate_grace_seconds=terminate_grace_seconds,
+                dispatcher=dispatcher,
+                joblimit_factory=joblimit_factory,
+                telemetry=telemetry,
+            )
+            return rc
+    finally:
+        telemetry.end_run(rc)
+        telemetry.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +191,10 @@ def launch(
 
 @contextmanager
 def _bracket_lifecycle(
-    config: ServiceConfig, sources: Mapping[str, SecretSource]
+    config: ServiceConfig,
+    sources: Mapping[str, SecretSource],
+    *,
+    telemetry: TelemetryClient | None = None,
 ) -> Iterator[None]:
     """init() lifecycle-stateful sources before, teardown() after."""
     initialized: list[SecretSource] = []
@@ -182,6 +213,7 @@ def _bracket_lifecycle(
                     config,
                     "source.teardown_failed",
                     {"source": src.name, "error": type(exc).__name__},
+                    telemetry=telemetry,
                 )
 
 
@@ -212,6 +244,7 @@ def _spawn_and_wait(
     terminate_grace_seconds: float = 5.0,
     dispatcher: CommsDispatcher | None = None,
     joblimit_factory: JoblimitFactory = JobLimit,
+    telemetry: TelemetryClient | None = None,
 ) -> int:
     """Spawn one child with the given env, wait for exit OR healthz unhealthy.
 
@@ -233,6 +266,7 @@ def _spawn_and_wait(
             "secrets_injected": [s.target_env for s in config.spec.secrets],
         },
         dispatcher=dispatcher,
+        telemetry=telemetry,
     )
 
     proc = popen(cmd, env=dict(env), cwd=cwd)
@@ -283,6 +317,7 @@ def _spawn_and_wait(
         "child.exit",
         {"returncode": rc, "healthz_signaled": healthz_signaled},
         dispatcher=dispatcher,
+        telemetry=telemetry,
     )
     return rc
 
@@ -316,8 +351,9 @@ def _emit_event(
     ctx: dict[str, Any],
     *,
     dispatcher: CommsDispatcher | None = None,
+    telemetry: TelemetryClient | None = None,
 ) -> None:
-    """Structured stdout log line + optional webhook dispatch."""
+    """Structured stdout log line + optional webhook dispatch + optional OTel."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),  # noqa: UP017
         "service": config.metadata.name,
@@ -338,6 +374,47 @@ def _emit_event(
     print(line, file=sys.stdout, flush=True)
     if dispatcher is not None:
         dispatcher.dispatch(kind, ctx)
+    if telemetry is not None:
+        telemetry.record_event(kind, ctx)
+
+
+# Restart-loop entry point lives in _launcher_run to dodge the
+# cross-mount Write-tool truncation. Re-exported under recto.launcher.run
+# so callers don't need to know about the split.
+from recto._launcher_run import run  # noqa: E402, F401
+
+
+def _emit_event(
+    config: ServiceConfig,
+    kind: str,
+    ctx: dict[str, Any],
+    *,
+    dispatcher: CommsDispatcher | None = None,
+    telemetry: TelemetryClient | None = None,
+) -> None:
+    """Structured stdout log line + optional webhook dispatch + optional OTel."""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),  # noqa: UP017
+        "service": config.metadata.name,
+        "kind": kind,
+        "ctx": ctx,
+    }
+    try:
+        line = json.dumps(record, default=str)
+    except (TypeError, ValueError) as exc:
+        line = json.dumps(
+            {
+                "ts": record["ts"],
+                "service": record["service"],
+                "kind": "internal.event_serialize_failed",
+                "ctx": {"original_kind": kind, "error": str(exc)},
+            }
+        )
+    print(line, file=sys.stdout, flush=True)
+    if dispatcher is not None:
+        dispatcher.dispatch(kind, ctx)
+    if telemetry is not None:
+        telemetry.record_event(kind, ctx)
 
 
 # Restart-loop entry point lives in _launcher_run to dodge the

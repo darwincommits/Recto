@@ -42,6 +42,14 @@ otel = [
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp-proto-http>=1.20",
 ]  # `pip install recto[otel]` to enable spec.telemetry tracing
+v0_4 = [
+    "cryptography>=42",     # Ed25519 sign/verify via the cryptography backend
+    "pyjwt[crypto]>=2.8",   # JWT EdDSA encode/verify (pulls cryptography too)
+]  # `pip install recto[v0_4]` to enable phone-resident vault (enclave_stub
+   # backend, recto.bootloader, recto v0.4 register/revoke CLI). The phone
+   # app itself is a separate MAUI Blazor project under /phone; this extra
+   # only covers the Recto-side dependencies for the bootloader and the
+   # in-process stub used for testing without phone hardware.
 
 [project.urls]
 Homepage = "https://github.com/darwincommits/Recto"

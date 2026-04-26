@@ -1,0 +1,466 @@
+"""HTTPS server for the v0.4 bootloader.
+
+Implements the endpoint set defined in `docs/v0.4-protocol.md`:
+
+- POST /v0.4/register
+- GET  /v0.4/registration_challenge
+- POST /v0.4/issue_session
+- GET  /v0.4/pending?phone_id=<id>
+- POST /v0.4/respond/<request_id>
+
+Uses stdlib `http.server.ThreadingHTTPServer` + `ssl.SSLContext`. No
+extra HTTP-framework dependency. The server is single-process (one
+bootloader per service, owned by the launcher); concurrency comes from
+the threading mixin handling each request on its own thread.
+
+State access is delegated to `recto.bootloader.state.StateStore`, which
+is internally thread-safe. The handler holds a reference to the store
+and a few config values via class attributes set at server creation.
+
+Threat model notes are in module docstrings of `state.py` and
+`sessions.py`. This module enforces the wire-protocol contract; it does
+NOT do rate limiting, brute-force defense, or replay protection beyond
+the JWT `jti` and challenge expiry. Production hardening is followup
+work tracked in the v0.4 deferred-items list.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import secrets
+import time
+import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from recto.bootloader import (
+    BootloaderError,
+    PendingRequestNotFoundError,
+    RegistrationExpiredError,
+    UnknownPhoneError,
+)
+from recto.bootloader.sessions import (
+    build_session_issuance_payload,
+    verify_jwt,
+    verify_signature,
+)
+from recto.bootloader.state import (
+    PendingRequest,
+    PhoneRegistration,
+    Session,
+    StateStore,
+)
+
+__all__ = [
+    "BootloaderHandler",
+    "BootloaderConfig",
+    "ChallengeStore",
+    "create_server",
+]
+
+PROTOCOL_VERSION = 1
+
+
+class BootloaderConfig:
+    """Server-side config values shared across requests.
+
+    Lives on the handler class as a class attribute (set by
+    `create_server`). Threading.local would be overkill -- these
+    values don't change during the bootloader's lifetime."""
+
+    bootloader_id: str = ""
+    state: StateStore | None = None
+    challenges: "ChallengeStore | None" = None
+    default_session_lifetime_seconds: int = 86400  # 24h
+    default_session_max_uses: int = 1000
+
+
+class ChallengeStore:
+    """In-memory store of one-time challenges.
+
+    Two challenge types share the same TTL store:
+    - Registration challenges (60s TTL, single use).
+    - Pairing codes (300s TTL, single use, 6-digit human-readable).
+
+    Not persisted. On bootloader restart, all in-flight challenges are
+    invalidated -- the operator re-runs `recto v0.4 register` to get
+    a fresh code.
+    """
+
+    def __init__(self) -> None:
+        self._challenges: dict[str, int] = {}  # value -> expires_at_unix
+        self._pairing_codes: dict[str, int] = {}  # code -> expires_at_unix
+
+    def issue_challenge(self, ttl_seconds: int = 60) -> tuple[str, int]:
+        c = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+        exp = int(time.time()) + ttl_seconds
+        self._challenges[c] = exp
+        return c, exp
+
+    def consume_challenge(self, c: str) -> bool:
+        """Return True if the challenge exists and is unexpired; remove
+        it on success (single-use)."""
+        self._purge()
+        exp = self._challenges.pop(c, None)
+        return exp is not None and time.time() < exp
+
+    def issue_pairing_code(self, ttl_seconds: int = 300) -> tuple[str, int]:
+        # 6-digit human-readable; collision risk acceptable for personal-use.
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        exp = int(time.time()) + ttl_seconds
+        self._pairing_codes[code] = exp
+        return code, exp
+
+    def consume_pairing_code(self, code: str) -> bool:
+        self._purge()
+        exp = self._pairing_codes.pop(code, None)
+        return exp is not None and time.time() < exp
+
+    def _purge(self) -> None:
+        now = time.time()
+        self._challenges = {c: e for c, e in self._challenges.items() if e > now}
+        self._pairing_codes = {c: e for c, e in self._pairing_codes.items() if e > now}
+
+
+class BootloaderHandler(BaseHTTPRequestHandler):
+    """HTTP request handler implementing the v0.4 endpoint set."""
+
+    # Override the default banner to not leak Python version.
+    server_version = "RectoBootloader/0.4"
+    sys_version = ""
+
+    config: BootloaderConfig = BootloaderConfig()
+
+    # ------------------------------------------------------------------
+    # Request dispatch
+    # ------------------------------------------------------------------
+
+    def do_GET(self) -> None:
+        try:
+            url = urlparse(self.path)
+            if url.path == "/v0.4/registration_challenge":
+                self._handle_registration_challenge(url)
+            elif url.path == "/v0.4/pending":
+                self._handle_pending(url)
+            elif url.path == "/v0.4/health":
+                self._handle_health()
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown_endpoint"})
+        except BootloaderError as e:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bootloader_error", "detail": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "internal", "detail": type(e).__name__},
+            )
+
+    def do_POST(self) -> None:
+        try:
+            url = urlparse(self.path)
+            body = self._read_json_body()
+            if url.path == "/v0.4/register":
+                self._handle_register(body)
+            elif url.path == "/v0.4/issue_session":
+                self._handle_issue_session(body)
+            elif url.path.startswith("/v0.4/respond/"):
+                request_id = url.path[len("/v0.4/respond/"):]
+                self._handle_respond(request_id, body)
+            else:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown_endpoint"})
+        except BootloaderError as e:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "bootloader_error", "detail": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "internal", "detail": type(e).__name__},
+            )
+
+    # ------------------------------------------------------------------
+    # GET /v0.4/health
+    # ------------------------------------------------------------------
+
+    def _handle_health(self) -> None:
+        cfg = self.config
+        self._send_json(HTTPStatus.OK, {
+            "ok": True,
+            "bootloader_id": cfg.bootloader_id,
+            "v0_4_protocol": PROTOCOL_VERSION,
+        })
+
+    # ------------------------------------------------------------------
+    # GET /v0.4/registration_challenge
+    # ------------------------------------------------------------------
+
+    def _handle_registration_challenge(self, url) -> None:
+        cfg = self.config
+        if cfg.challenges is None:
+            raise BootloaderError("challenge store not initialized")
+        # Optional pairing-code gating: if `code=` query param is present,
+        # the operator-issued pairing code must match.
+        params = parse_qs(url.query)
+        if "code" in params:
+            if not cfg.challenges.consume_pairing_code(params["code"][0]):
+                raise RegistrationExpiredError("pairing code expired or invalid")
+        challenge, expires_at = cfg.challenges.issue_challenge()
+        self._send_json(HTTPStatus.OK, {
+            "challenge_b64u": challenge,
+            "expires_at_unix": expires_at,
+        })
+
+    # ------------------------------------------------------------------
+    # POST /v0.4/register
+    # ------------------------------------------------------------------
+
+    def _handle_register(self, body: dict[str, Any]) -> None:
+        cfg = self.config
+        if cfg.state is None or cfg.challenges is None:
+            raise BootloaderError("server not initialized")
+        proof = body.get("registration_proof") or {}
+        challenge = proof.get("challenge", "")
+        sig = proof.get("signature_b64u", "")
+        public_key_b64u = body.get("public_key_b64u", "")
+        device_label = body.get("device_label", "(unnamed)")
+        algos = tuple(body.get("supported_algorithms", ["ed25519"]))
+        if body.get("v0_4_protocol") != PROTOCOL_VERSION:
+            raise BootloaderError(
+                f"protocol version mismatch: server={PROTOCOL_VERSION}, "
+                f"phone={body.get('v0_4_protocol')!r}"
+            )
+        if not cfg.challenges.consume_challenge(challenge):
+            raise RegistrationExpiredError("registration challenge expired or invalid")
+        # Verify the phone's signature over the challenge using the
+        # claimed public key. This proves possession of the private
+        # key without disclosing it.
+        ok = verify_signature(
+            payload=challenge.encode("ascii"),
+            signature_b64u=sig,
+            public_key_b64u=public_key_b64u,
+        )
+        if not ok:
+            raise BootloaderError("registration proof signature invalid")
+        reg = PhoneRegistration.new(
+            device_label=str(device_label),
+            public_key_b64u=public_key_b64u,
+            supported_algorithms=algos,
+        )
+        cfg.state.register_phone(reg)
+        self._send_json(HTTPStatus.CREATED, {
+            "registered": True,
+            "phone_id": reg.phone_id,
+            "bootloader_id": cfg.bootloader_id,
+            # Empty managed_secrets for now; the operator wires services
+            # to specific phone_ids via service.yaml's
+            # spec.secrets[].config.phone_id field (TBD once the launcher
+            # side lands).
+            "managed_secrets": [],
+        })
+
+    # ------------------------------------------------------------------
+    # POST /v0.4/issue_session
+    # ------------------------------------------------------------------
+
+    def _handle_issue_session(self, body: dict[str, Any]) -> None:
+        cfg = self.config
+        if cfg.state is None:
+            raise BootloaderError("server not initialized")
+        phone_id = body.get("phone_id", "")
+        token = body.get("session_token_jwt", "")
+        phone = cfg.state.get_phone(phone_id)
+        if phone is None:
+            raise UnknownPhoneError(f"phone_id {phone_id!r} not registered")
+        # Verify the JWT signature against the phone's public key, and
+        # parse the claims.
+        claims = verify_jwt(
+            token,
+            public_key_b64u=phone.public_key_b64u,
+            audience=cfg.bootloader_id,
+        )
+        sess = Session(
+            service=claims.service,
+            secret=claims.secret,
+            phone_id=phone_id,
+            jwt=token,
+            expires_at_unix=claims.exp,
+            issued_at_unix=claims.iat,
+            max_uses=claims.recto_max_uses,
+            uses_so_far=0,
+        )
+        cfg.state.put_session(sess)
+        self._send_json(HTTPStatus.CREATED, {
+            "session_id": claims.jti,
+            "expires_at_unix": claims.exp,
+        })
+
+    # ------------------------------------------------------------------
+    # GET /v0.4/pending?phone_id=<id>
+    # ------------------------------------------------------------------
+
+    def _handle_pending(self, url) -> None:
+        cfg = self.config
+        if cfg.state is None:
+            raise BootloaderError("server not initialized")
+        params = parse_qs(url.query)
+        phone_ids = params.get("phone_id", [])
+        if not phone_ids:
+            raise BootloaderError("phone_id query parameter required")
+        phone_id = phone_ids[0]
+        if cfg.state.get_phone(phone_id) is None:
+            raise UnknownPhoneError(f"phone_id {phone_id!r} not registered")
+        pending = cfg.state.list_pending_for_phone(phone_id)
+        self._send_json(HTTPStatus.OK, {
+            "requests": [self._pending_to_wire(p) for p in pending],
+        })
+
+    @staticmethod
+    def _pending_to_wire(p: PendingRequest) -> dict[str, Any]:
+        return {
+            "request_id": p.request_id,
+            "kind": p.kind,
+            "service": p.service,
+            "secret": p.secret,
+            "context": {
+                "child_pid": p.child_pid,
+                "child_argv0": p.child_argv0,
+                "requested_at_unix": p.requested_at_unix,
+                "operation_description": p.operation_description,
+                "payload_hash_b64u": p.payload_hash_b64u,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # POST /v0.4/respond/<request_id>
+    # ------------------------------------------------------------------
+
+    def _handle_respond(self, request_id: str, body: dict[str, Any]) -> None:
+        cfg = self.config
+        if cfg.state is None:
+            raise BootloaderError("server not initialized")
+        req = cfg.state.take_pending(request_id)
+        if req is None:
+            raise PendingRequestNotFoundError(
+                f"request_id {request_id!r} not found"
+            )
+        decision = body.get("decision", "")
+        if decision == "denied":
+            # Operator declined; surface to whoever is awaiting the
+            # response. The waiting mechanism (an in-process Future or
+            # similar) is the launcher's responsibility; the bootloader
+            # just marks the pending as resolved-with-denial.
+            self._notify_resolved(req, ok=False, signature_b64u=None,
+                                  reason=body.get("reason", "denied"))
+            self._send_json(HTTPStatus.OK, {"resolved": True})
+            return
+        if decision != "approved":
+            raise BootloaderError(f"unknown decision {decision!r}")
+        sig = body.get("signature_b64u", "")
+        phone = cfg.state.get_phone(req.phone_id)
+        if phone is None:
+            raise UnknownPhoneError(f"phone {req.phone_id!r} no longer registered")
+        # Verify the phone's signature over the payload hash.
+        # The phone signs the BLAKE2b-256 hash, not the raw payload,
+        # so we verify against the hash bytes.
+        padding = "=" * (-len(req.payload_hash_b64u) % 4)
+        hash_bytes = base64.urlsafe_b64decode(req.payload_hash_b64u + padding)
+        ok = verify_signature(
+            payload=hash_bytes,
+            signature_b64u=sig,
+            public_key_b64u=phone.public_key_b64u,
+        )
+        if not ok:
+            self._notify_resolved(req, ok=False, signature_b64u=None,
+                                  reason="signature verification failed")
+            raise BootloaderError("approved-response signature invalid")
+        self._notify_resolved(req, ok=True, signature_b64u=sig, reason=None)
+        self._send_json(HTTPStatus.OK, {"resolved": True})
+
+    def _notify_resolved(
+        self,
+        req: PendingRequest,
+        *,
+        ok: bool,
+        signature_b64u: str | None,
+        reason: str | None,
+    ) -> None:
+        """Surface a request resolution to the waiting launcher.
+
+        Production wires this through an in-process map of
+        request_id -> threading.Event / Future. For v0.4.0 this is
+        intentionally a no-op stub -- the integration hook lives on
+        the BootloaderConfig and tests inject their own callable.
+        """
+        notify_fn = getattr(self.config, "notify_resolved_fn", None)
+        if notify_fn is not None:
+            notify_fn(req=req, ok=ok, signature_b64u=signature_b64u, reason=reason)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _read_json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise BootloaderError(f"invalid JSON body: {exc}") from exc
+        if not isinstance(data, dict):
+            raise BootloaderError("body must be a JSON object")
+        return data
+
+    def _send_json(self, status: HTTPStatus, body: dict[str, Any]) -> None:
+        payload = json.dumps(body, sort_keys=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        # Override default stderr logging to use Recto's logging
+        # convention. The bootloader runs as a service; default
+        # http.server logging would flood AppStdout.
+        # For v0.4.0 we silently drop access logs; v0.4.1+ adds a
+        # configurable access log path.
+        return
+
+
+def create_server(
+    *,
+    bind_host: str,
+    bind_port: int,
+    state: StateStore,
+    bootloader_id: str | None = None,
+    challenges: ChallengeStore | None = None,
+    notify_resolved_fn: Any = None,
+    ssl_context: Any = None,
+) -> ThreadingHTTPServer:
+    """Construct (but do not start) a bootloader HTTPServer.
+
+    Caller is responsible for `server.serve_forever()` and shutdown.
+    The handler class is mutated with the runtime config; if you need
+    multiple bootloaders in the same process (rare), copy
+    BootloaderHandler and pass that copy to a fresh ThreadingHTTPServer.
+
+    `ssl_context` is an `ssl.SSLContext` already loaded with the cert
+    chain. None means HTTP (NOT recommended; useful only for tests).
+    """
+    server = ThreadingHTTPServer((bind_host, bind_port), BootloaderHandler)
+    if ssl_context is not None:
+        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+    BootloaderHandler.config = BootloaderConfig()
+    BootloaderHandler.config.bootloader_id = (
+        bootloader_id if bootloader_id is not None else str(uuid.uuid4())
+    )
+    BootloaderHandler.config.state = state
+    BootloaderHandler.config.challenges = (
+        challenges if challenges is not None else ChallengeStore()
+    )
+    if notify_resolved_fn is not None:
+        BootloaderHandler.config.notify_resolved_fn = notify_resolved_fn  # type: ignore[attr-defined]
+    return server

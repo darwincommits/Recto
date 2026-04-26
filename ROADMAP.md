@@ -59,22 +59,50 @@ Original timeframes (April-May 2026 → late-2026/2027) were drafted before AI-a
 
 ## v0.4 — "Secrets that never sit on the server"
 
-**Target:** August 2026 (~6-8 weeks after v0.3). The marquee phase. The substantial open architectural questions below mean this estimate is the softest in the roadmap; expect it to drift if any of phone-availability recovery, latency model, or post-quantum hardware support take longer than scoped. Gating dependency for downstream consumer work.
+**Target:** Substrate landed 2026-04-26 (compressed from August 2026 estimate after the same-day v0.3-deferral decision). v0.4.0 release pending: launcher integration, CLI, and the companion phone app. The marquee phase. Designed to be quantum-resistant in the wire format from day one (post-quantum signature schemes — Dilithium / Falcon / SPHINCS+ — slot in via the `algorithm` negotiation field once iOS Secure Enclave / Android StrongBox support catches up). v0.4.0 ships Ed25519 only.
 
-**Scope:** Hardware-enclave secret backend. Secrets live in a phone's Secure Enclave or StrongBox; never touch the server's filesystem. Each cryptographic operation (sign / decrypt) is biometric-gated on the phone. Designed to be quantum-resistant from the start (NIST-finalized PQ signature schemes — Dilithium / Falcon / SPHINCS+ — when hardware support catches up; classical ECDSA in-enclave as the bridge).
+**Scope:** Hardware-enclave secret backend. Private keys live in a phone's Secure Enclave (iOS) or StrongBox (Android); never touch the server's filesystem. Each cryptographic operation (sign / decrypt) is biometric-gated on the phone via `LAContext` (iOS) / `BiometricPrompt` (Android).
+
+**Locked design decisions** (see `docs/v0.4-protocol.md` for the full RFC):
+
+- **Distribution**: personal-use only via TestFlight (iOS) / APK sideload (Android) for v0.4.0. App-store distribution waits for v0.5+ which adds multi-user account abstractions.
+- **Transport**: HTTPS + push wakeup (APNs / FCM). NOT QUIC (originally drafted but deferred -- MAUI's QUIC story is too immature for v0.4.0; revisit if mobile-network reliability becomes a real complaint).
+- **Signature scheme**: Ed25519 (RFC 8032). 32-byte public keys, 64-byte signatures, deterministic. iOS 16+ + Android 11+ enclave native support.
+- **Session model**: short-lived JWT (default 24h, max 1000 uses, configurable per-secret). Phone signs the JWT once during issuance; bootloader caches and replays for in-session sign operations until expiry. Proactive renewal at 80% of lifetime/uses to avoid latency spikes. Mitigates the "phone wakeup per sign operation" UX disaster.
 
 **Architecture:**
-- A companion bootloader process per customer that bridges the consumer's main app and the employee's phone-resident vault.
-- The bootloader is OSS (lives in this repo); customers self-host. We never see customer secrets.
-- Recto launcher detects `SigningCapability` returns (vs `DirectSecret`) and exposes a local-socket sign-helper to the child process instead of an env var. Child apps that opt in call the sign-helper for cryptographic operations; child apps that don't continue using env-var sources unchanged.
-- Network protocol between launcher and bootloader: QUIC + signed challenges. Push-notification wakeup (APNs / FCM) for foreground operations.
 
-**Open questions (resolve closer to ship date):**
-- Phone-availability recovery: co-signers, sealed cold-storage backup, grace-period fallback. Trezor / Ledger conventions probably apply.
-- Latency model: short-lived session tokens issued by phone, cached on server with N-minute lifetime. Phone signs the session-token issuance, not every operation.
+- **Bootloader process** (`recto.bootloader`, this repo): long-lived Python process spawned by the launcher when any `spec.secrets[].source == "enclave"`. Holds public keys + cached session JWTs + pending sign requests. Runs an HTTPS server the phone polls; speaks to the launcher over a local socket. Customers self-host; we never see customer secrets.
+- **Launcher integration** (`recto.launcher` extension): detects `SigningCapability` fetch results and routes them through a local-socket sign-helper instead of env-var injection. Child apps that opt in call the sign-helper for cryptographic operations; child apps that don't continue using env-var sources unchanged.
+- **Sign-helper protocol** (`recto.sign_helper`): Unix socket (Linux/macOS) or Windows named pipe between launcher and supervised child. Length-prefixed JSON wire format. v0.4.0 ships Unix sockets only; Windows named pipe is v0.4.1 followup.
+- **Phone app** (separate MAUI Blazor project under `/phone/`): cross-platform .NET MAUI app. Generates Ed25519 keypair in platform enclave; biometric-gated sign UI; push-notification listener; HTTPS client implementing the wire-protocol RFC.
+
+**Shipped (2026-04-26 substrate batch 1):**
+
+- `docs/v0.4-protocol.md` — wire-protocol RFC (430 lines, locked).
+- `recto.secrets.enclave_stub` — in-memory Ed25519 backend for testing the launcher's SigningCapability code path without phone hardware.
+- `recto.bootloader` package — state persistence, JWT/signature verify helpers, HTTPS endpoint handlers.
+- `recto.sign_helper` — local-socket server (launcher side) + reference Python client (consumer side).
+- `[v0_4]` optional dependency extra (`pip install recto[v0_4]`).
+- 64 new tests (517/526 full-suite passing; 9 Windows-only skips).
+
+**Pending (substrate batch 2 + ship):**
+
+- Launcher integration (start `SignHelperServer` when SigningCapability is fetched; set `RECTO_SIGN_HELPER` env var on child).
+- CLI: `recto v0.4 register` (issue pairing code), `recto v0.4 revoke <phone_id>`, `recto v0.4 list-phones`, `recto v0.4 serve` (run bootloader as a foreground process for testing; production deploys it under Recto itself).
+- Push-notification helpers (APNs via `aioapns`, FCM via stdlib HTTP POST). Stubbed in v0.4 substrate; real backends for v0.4.0.
+- End-to-end HTTP integration tests for `bootloader.server` (currently unit-tested at handler dispatch level).
+- Windows named-pipe transport for `sign_helper`.
+- Phone app (MAUI Blazor) -- separate project, built against the RFC.
+
+**Open questions (post-v0.4.0):**
+
+- Phone-availability recovery beyond "register two phones, revoke the lost one." Co-signers (m-of-n), sealed cold-storage backup keys signed by a hardware wallet (Trezor / Ledger). v0.6+.
+- Cross-bootloader federation: single phone trusted by multiple bootloaders. Useful for operators with N services across N hosts.
+- Audit log of every sign approval (timestamp, requesting child PID, payload hash). v0.4.1+.
 - Revenue model: support / hardening / compliance audits around the OSS bootloader, possibly a hosted enterprise distro. Decided closer to ship.
 
-**Pre-requisites:** v0.1 + v0.2 + v0.3 in production with real users; consumer base of users who'd upgrade their secret backend; high-value secret stores (cloud APIs, signing keys) to sign against.
+**Pre-requisites for the substrate were:** v0.1 + v0.2 in production with real consumers (✓), the SigningCapability ABC seam (✓ shipped in v0.1). v0.3 multi-platform backends and v0.3 Linux/macOS launcher work were originally listed as prereqs but proved separable -- v0.4 substrate ships independently and the v0.3 work resurfaces as a separate sprint when consumer demand warrants.
 
 ## Long-term ideas (no timeline)
 

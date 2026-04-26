@@ -81,3 +81,18 @@ private/
 CLAUDE.md.tmp
 *.tmp
 pytest-cache-files-*
+
+# v0.4 phone app (MAUI Blazor) — source tracked under /phone/, build
+# artifacts (bin/, obj/, .vs/, NuGet packages, Android APK staging,
+# iOS DerivedData) are not. The /phone/ folder itself stays in the
+# repo so contributors can build the app; only its compile outputs
+# are ignored.
+/phone/**/bin/
+/phone/**/obj/
+/phone/**/.vs/
+/phone/**/packages/
+/phone/**/Properties/launchSettings.json
+/phone/**/AppPackages/
+/phone/**/Resources/Raw/.gitkeep
+/phone/**/*.user
+/phone/**/*.suo

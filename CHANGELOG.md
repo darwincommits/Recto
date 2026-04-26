@@ -7,6 +7,84 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.4 substrate (phone-resident vault, server-side)
+
+The launcher-side substrate for the v0.4 marquee feature: secrets that
+never sit on the server. Private keys live in a phone's Secure Enclave
+(iOS) or StrongBox (Android); each cryptographic operation is biometric-
+gated on the phone. This commit ships everything that lives on the
+server; the phone app is a separate MAUI Blazor project under `/phone/`
+(in development).
+
+- **`docs/v0.4-protocol.md`** — wire-protocol RFC for phone <-> bootloader.
+  Covers: components, HTTPS endpoints (`/v0.4/register`,
+  `/v0.4/registration_challenge`, `/v0.4/issue_session`, `/v0.4/pending`,
+  `/v0.4/respond/<id>`), key onboarding flow, sign-request flow,
+  session-token model (short-lived JWT for ergonomics), failure modes,
+  security model. Locked decisions: personal-use distribution (no app
+  store), HTTPS + push wakeup (no QUIC), Ed25519 signatures, short-lived
+  JWT sessions. Comprehensive enough that the MAUI Blazor app can be
+  built independently against the same contract.
+- **`recto.secrets.enclave_stub.EnclaveStubSource`** — in-memory
+  Ed25519 backend for end-to-end testing of the launcher's
+  SigningCapability code path WITHOUT phone hardware. Generates a key
+  in process memory; signs locally. Selector: `enclave-stub` (NOT
+  `enclave`) so a misconfigured production service.yaml fails loudly
+  rather than silently using the wrong backend. Optional deterministic
+  seed for reproducible test fixtures. Requires `cryptography`
+  (`pip install recto[v0_4]`); import raises a clear remediation error
+  if the extra isn't installed.
+- **`recto.bootloader`** package — server-side bridge between the
+  launcher and the phone-resident vault.
+  - `state.StateStore` — thread-safe persistence of phones, session
+    JWTs, and pending sign requests under
+    `~/.recto/bootloader/{phones,sessions,pending}.json`. ACL-tightened
+    to operator-only on Linux/macOS; Windows inherits per-user APPDATA
+    permissions. Pending requests intentionally NOT persisted across
+    restart (in-flight requests fail rather than carrying over dirty
+    state).
+  - `sessions` module — JWT EdDSA verify + raw Ed25519 signature verify
+    wrappers over `pyjwt` + `cryptography`. Lazy imports surface clear
+    errors when [v0_4] extra isn't installed.
+  - `server.BootloaderHandler` + `create_server` — stdlib-only
+    `ThreadingHTTPServer` implementing the v0.4 endpoint set. TLS via
+    `ssl.SSLContext` (caller-provided cert chain). Single-process, one
+    bootloader per service.
+- **`recto.sign_helper`** — local-socket sign-helper between launcher
+  and supervised child process. The launcher exposes a Unix socket per
+  service (Linux/macOS only in v0.4.0; Windows named pipe is followup).
+  Wire format: 4-byte BE length-prefixed UTF-8 JSON. Requests are
+  `{kind: "sign", secret, payload_b64u}`; responses are
+  `{ok: true, signature_b64u, algorithm, public_key_b64u}` or
+  `{ok: false, error, detail}`. `SignHelperClient.from_env()` reads
+  `RECTO_SIGN_HELPER` env var that the launcher sets on the child.
+  Reference Python client; other-language clients implement the same
+  wire format.
+- **`pyproject.toml`** — new `[v0_4]` optional-deps extra
+  (`cryptography>=42`, `pyjwt[crypto]>=2.8`). Install with
+  `pip install recto[v0_4]` to enable the bootloader and stub backend.
+- **`.gitignore`** — `phone/**/{bin,obj,.vs,packages,...}/` for MAUI
+  Blazor build artifacts. Source under `phone/` is tracked; only
+  compile outputs are ignored.
+- **64 new tests** across `tests/test_secrets_enclave_stub.py`,
+  `tests/test_bootloader_state.py`, `tests/test_bootloader_sessions.py`,
+  `tests/test_sign_helper.py`. Round-trip Ed25519 signing,
+  JWT verify with valid / expired / wrong-audience / wrong-key cases,
+  state-store concurrency + persistence + revocation cascade, sign-
+  helper end-to-end via real Unix sockets, frame-protocol edge cases.
+
+NOT in this commit (followup work tracked):
+
+- Launcher integration (`recto.launcher` extension to detect
+  SigningCapability returns and start `SignHelperServer`).
+- CLI `recto v0.4 register / revoke / list-phones / serve` subcommands.
+- Bootloader server end-to-end HTTP integration tests.
+- Push-notification helpers (APNs / FCM) -- placeholder TODO in
+  `bootloader/server.py`.
+- Windows named-pipe transport for `sign_helper` (Linux/macOS sockets
+  only in v0.4.0).
+- The phone app itself (MAUI Blazor; in `/phone/`, separate build).
+
 ### Added — `recto secrets list <service>` (backend-agnostic secret enumeration)
 
 - New `secrets` subcommand group with one subcommand initially:

@@ -41,6 +41,7 @@ from recto.secrets.base import (
 )
 from recto.secrets.credman import CredManSource
 from recto.secrets.dpapi_machine import DpapiMachineSource
+from recto.secrets.enclave_stub import EnclaveStubSource
 from recto.secrets.env import EnvSource
 
 
@@ -110,12 +111,25 @@ register_source(
     "dpapi-machine",
     lambda service: DpapiMachineSource(service),
 )
+# v0.4 stub backend. Generates an Ed25519 keypair in process memory and
+# returns SigningCapability values for end-to-end testing of the
+# launcher's SigningCapability code path WITHOUT requiring a phone
+# enclave or the bootloader process. NOT FOR PRODUCTION -- the whole
+# point of v0.4 is that private keys don't sit on the server. The
+# selector name is "enclave-stub" (not "enclave") so a misconfigured
+# production service.yaml fails loudly. The real "enclave" backend
+# (TBD) routes via recto.bootloader to the phone-resident vault.
+register_source(
+    "enclave-stub",
+    lambda service: EnclaveStubSource(service),
+)
 
 
 __all__ = [
     "CredManSource",
     "DirectSecret",
     "DpapiMachineSource",
+    "EnclaveStubSource",
     "EnvSource",
     "SecretMaterial",
     "SecretNotFoundError",

@@ -1,0 +1,83 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# mypy / ruff
+.mypy_cache/
+.ruff_cache/
+
+# Recto runtime
+*.log
+recto-state/
+
+# Operator-specific AI memory (never commit)
+# Both paths are gitignored:
+# - .claude/ was the original location; left ignored to defend against any
+#   tool that auto-creates files there.
+# - private/ is the active location for operator-private memory (local.md
+#   etc.) since 2026-04-26 — Cowork's sandbox blocks AI Write/Edit on
+#   `.claude/`, so the file moved here to keep AI-driven IM updates
+#   working without a chat-paste roundtrip.
+.claude/
+private/
+
+# Stray scratch files
+CLAUDE.md.tmp
+*.tmp
+pytest-cache-files-*

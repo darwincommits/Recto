@@ -7,6 +7,39 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.2.2 integration-prep gap fixes
+- `recto.adminui.EventBuffer.derived_state()` and four new fields in
+  the `/api/status` payload — `restart_count`, `last_spawn_ts`,
+  `last_exit_returncode`, `last_healthz_signaled_ts` — derived from
+  the existing event stream. The embedded HTML index renders them
+  in the Status tab with relative-time formatting (`5m ago`,
+  `2h ago`). 7 new tests in `tests/test_adminui.py`.
+- `recto migrate-from-nssm --keep-as-env=NAME[,NAME...]` flag plus
+  `recto._migrate.partition_env_entries()` helper. Routes named
+  AppEnvironmentExtra keys into the generated YAML's `spec.env:`
+  block instead of Credential Manager. Default (no flag) keeps
+  v0.1 behavior — every entry treated as a secret. `generate_service_yaml`
+  now emits a `spec.env:` block when plain-env entries are present.
+  10 new tests in `tests/test_cli.py`.
+- `recto events <yaml> [--kind K] [--limit N] [--restart-history]`
+  CLI subcommand. Reads the YAML to find `spec.admin_ui.bind`,
+  GETs `host:port/api/events` (or `/api/restart-history`), prints
+  the JSON. Falls back gracefully when admin_ui is disabled or the
+  server isn't reachable — points the operator at NSSM's AppStdout
+  log file. Useful during incidents when the admin UI itself is
+  down. 10 new tests in `tests/test_cli.py`.
+- `docs/comms-receiver.md` documents the convention for consumer
+  services receiving Recto's lifecycle event POSTs:
+  `POST /api/recto/events`, JSON body shape, headers, expected
+  response, idempotency. Includes a stdlib reference handler plus
+  nginx and Caddy reverse-proxy snippets.
+
+### Changed — v0.2.2
+- Test count: 376 → 400 (+24 across the four gap fixes).
+- v0.2.1 docs commit (`docs/install.md`, `docs/upgrade-from-nssm.md`,
+  `docs/integration-gaps.md`, `examples/sample.service.yaml`)
+  remains as v0.2.1 -- this v0.2.2 patch builds on top.
+
 ### Added — v0.2.1 docs (operator runbook + sample YAML)
 - `examples/sample.service.yaml` — minimal-but-realistic
   service.yaml demonstrating every `spec` section: secrets,

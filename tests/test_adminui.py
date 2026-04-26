@@ -354,3 +354,94 @@ class TestIndexHtml:
         assert "/api/status" in INDEX_HTML
         assert "/api/events" in INDEX_HTML
         assert "/api/restart-history" in INDEX_HTML
+
+
+# ---------------------------------------------------------------------------
+# v0.2.2: derived state on /api/status
+# ---------------------------------------------------------------------------
+
+
+class TestEventBufferDerivedState:
+    def test_empty_buffer_yields_zeros_and_nones(self) -> None:
+        buf = EventBuffer()
+        d = buf.derived_state()
+        assert d["restart_count"] == 0
+        assert d["last_spawn_ts"] is None
+        assert d["last_exit_returncode"] is None
+        assert d["last_healthz_signaled_ts"] is None
+
+    def test_restart_count_counts_child_exits(self) -> None:
+        buf = EventBuffer()
+        buf.append("child.spawn", {})
+        buf.append("child.exit", {"returncode": 0, "healthz_signaled": False})
+        buf.append("child.spawn", {})
+        buf.append("child.exit", {"returncode": 1, "healthz_signaled": False})
+        d = buf.derived_state()
+        assert d["restart_count"] == 2
+
+    def test_last_spawn_ts_picks_most_recent(self) -> None:
+        buf = EventBuffer()
+        buf.append("child.spawn", {"cmd": ["x"]})
+        first_spawn = buf.recent()[0]["ts"]
+        # Add other events; last_spawn_ts should still be the first one
+        # because no NEW spawn has happened.
+        buf.append("child.exit", {"returncode": 0, "healthz_signaled": False})
+        d = buf.derived_state()
+        assert d["last_spawn_ts"] == first_spawn
+        # Now another spawn -- last_spawn_ts updates.
+        buf.append("child.spawn", {"cmd": ["x"]})
+        second_spawn = buf.recent()[-1]["ts"]
+        d = buf.derived_state()
+        assert d["last_spawn_ts"] == second_spawn
+
+    def test_last_exit_returncode_uses_most_recent(self) -> None:
+        buf = EventBuffer()
+        buf.append("child.exit", {"returncode": 0, "healthz_signaled": False})
+        buf.append("child.exit", {"returncode": 1, "healthz_signaled": False})
+        buf.append("child.exit", {"returncode": 42, "healthz_signaled": False})
+        d = buf.derived_state()
+        assert d["last_exit_returncode"] == 42
+
+    def test_last_healthz_signaled_ts_only_for_probe_driven_exits(self) -> None:
+        buf = EventBuffer()
+        # Natural exit -- not healthz-driven.
+        buf.append("child.exit", {"returncode": 0, "healthz_signaled": False})
+        d = buf.derived_state()
+        assert d["last_healthz_signaled_ts"] is None
+        # Probe-driven exit -- ts gets recorded.
+        buf.append("child.exit", {"returncode": 143, "healthz_signaled": True})
+        probe_ts = buf.recent()[-1]["ts"]
+        d = buf.derived_state()
+        assert d["last_healthz_signaled_ts"] == probe_ts
+        # A subsequent non-probe exit must NOT clear last_healthz_signaled_ts.
+        buf.append("child.exit", {"returncode": 0, "healthz_signaled": False})
+        d = buf.derived_state()
+        assert d["last_healthz_signaled_ts"] == probe_ts
+
+
+class TestStatusPayloadDerivedFields:
+    def test_status_includes_derived_fields(
+        self, running_server: Any
+    ) -> None:
+        server, buf = running_server
+        _, port = server.bound_address
+        # Seed the buffer so derived fields have non-default values.
+        buf.append("child.spawn", {"cmd": ["python.exe"]})
+        buf.append("child.exit", {"returncode": 7, "healthz_signaled": True})
+        d = fetch_json(port, "/api/status")
+        assert d["restart_count"] == 1
+        assert d["last_exit_returncode"] == 7
+        assert isinstance(d["last_spawn_ts"], (int, float))
+        assert isinstance(d["last_healthz_signaled_ts"], (int, float))
+
+    def test_status_derived_fields_default_to_zero_or_none(
+        self, running_server: Any
+    ) -> None:
+        server, _buf = running_server
+        _, port = server.bound_address
+        # No events buffered -> derived fields at their zero/None defaults.
+        d = fetch_json(port, "/api/status")
+        assert d["restart_count"] == 0
+        assert d["last_spawn_ts"] is None
+        assert d["last_exit_returncode"] is None
+        assert d["last_healthz_signaled_ts"] is None

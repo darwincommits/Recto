@@ -130,6 +130,49 @@ class EventBuffer:
         with self._lock:
             return len(self._buf)
 
+    # ------------------------------------------------------------------
+    # Derived state -- snapshots over the event stream for /api/status.
+    # All four are O(n) in buffer size with default cap = 1000, so cheap
+    # enough to compute on every status poll. The producer-side append
+    # path stays unchanged.
+    # ------------------------------------------------------------------
+
+    def derived_state(self) -> dict[str, Any]:
+        """Compute the four /api/status fields from the event stream.
+
+        - restart_count: number of `child.exit` events.
+        - last_spawn_ts: ts of the most recent `child.spawn`, or None.
+        - last_exit_returncode: ctx.returncode of the most recent
+          `child.exit`, or None.
+        - last_healthz_signaled_ts: ts of the most recent `child.exit`
+          where ctx.healthz_signaled is true, or None. Lets the
+          status tab spot a service that's been flapping on probe
+          failures specifically.
+        """
+        with self._lock:
+            snapshot = list(self._buf)
+        restart_count = 0
+        last_spawn_ts: float | None = None
+        last_exit_returncode: int | None = None
+        last_healthz_signaled_ts: float | None = None
+        for record in snapshot:
+            kind = record["kind"]
+            ctx = record["ctx"]
+            ts = record["ts"]
+            if kind == "child.spawn":
+                last_spawn_ts = ts
+            elif kind == "child.exit":
+                restart_count += 1
+                last_exit_returncode = ctx.get("returncode")
+                if ctx.get("healthz_signaled"):
+                    last_healthz_signaled_ts = ts
+        return {
+            "restart_count": restart_count,
+            "last_spawn_ts": last_spawn_ts,
+            "last_exit_returncode": last_exit_returncode,
+            "last_healthz_signaled_ts": last_healthz_signaled_ts,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Embedded HTML index (single-file UI page)
@@ -262,6 +305,15 @@ function renderEvents(targetId, events) {
         '</div>'
     ).join('') + '</div>';
 }
+function fmtNullable(v, formatter) {
+    if (v === null || v === undefined) return '<span style="color: var(--text-mute)">-</span>';
+    return formatter ? formatter(v) : String(v);
+}
+function fmtAge(ts) {
+    if (ts === null || ts === undefined) return '<span style="color: var(--text-mute)">never</span>';
+    const ageSeconds = (Date.now() / 1000) - ts;
+    return fmtDuration(ageSeconds) + ' ago (' + fmtTs(ts) + ')';
+}
 async function loadStatus() {
     const r = await fetch('/api/status'); const d = await r.json();
     document.getElementById('service-name').textContent = d.service;
@@ -273,6 +325,10 @@ async function loadStatus() {
         '<span class="key">restart.backoff</span><span>' + d.restart.backoff + '</span>' +
         '<span class="key">launcher uptime</span><span>' + fmtDuration(d.uptime_seconds) + '</span>' +
         '<span class="key">events recorded</span><span>' + d.event_count + '</span>' +
+        '<span class="key">restart count</span><span>' + d.restart_count + '</span>' +
+        '<span class="key">last spawn</span><span>' + fmtAge(d.last_spawn_ts) + '</span>' +
+        '<span class="key">last exit returncode</span><span>' + fmtNullable(d.last_exit_returncode) + '</span>' +
+        '<span class="key">last healthz trip</span><span>' + fmtAge(d.last_healthz_signaled_ts) + '</span>' +
         '</div></div>';
     document.getElementById('tab-status').innerHTML = html;
 }
@@ -389,6 +445,7 @@ class _ServerState:
 
     def status_payload(self) -> dict[str, Any]:
         spec = self.config.spec
+        derived = self.buffer.derived_state()
         return {
             "service": self.service_name,
             "healthz": {
@@ -401,6 +458,13 @@ class _ServerState:
             },
             "uptime_seconds": time.time() - self.buffer.start_time,
             "event_count": len(self.buffer),
+            # Derived from the event stream -- richer signal than uptime
+            # alone for triage. Each value is None until the relevant
+            # event has occurred at least once during this run.
+            "restart_count": derived["restart_count"],
+            "last_spawn_ts": derived["last_spawn_ts"],
+            "last_exit_returncode": derived["last_exit_returncode"],
+            "last_healthz_signaled_ts": derived["last_healthz_signaled_ts"],
         }
 
     def events_payload(self, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -546,6 +610,101 @@ class AdminUIServer:
         """Split a 'host:port' string. Defaults to 127.0.0.1:5050."""
         if ":" not in bind:
             return "127.0.0.1", 5050
+        host, _, port_s = bind.rpartition(":")
+        try:
+            port = int(port_s)
+        except (TypeError, ValueError):
+            port = 5050
+        return host or "127.0.0.1", port
+rvice_name: str,
+        buffer: EventBuffer,
+        config: Any,
+        emit_failure: Any | None = None,
+    ) -> None:
+        self.spec = spec
+        self._state = _ServerState(
+            service_name=service_name, buffer=buffer, config=config
+        )
+        self._emit_failure = emit_failure
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._bound_address: tuple[str, int] | None = None
+
+    @property
+    def bound_address(self) -> tuple[str, int] | None:
+        """The (host, port) the server actually bound to, or None."""
+        return self._bound_address
+
+    def start(self) -> None:
+        """Bind and spawn the server thread. No-op when disabled.
+
+        Soft-fails on bind errors -- logs via emit_failure and returns
+        without spawning a thread. The launcher checks `bound_address`
+        to know whether the UI is actually live.
+        """
+        if not self.spec.enabled:
+            return
+        host, port = self._parse_bind(self.spec.bind)
+        try:
+            handler_cls = _build_handler(self._state)
+            self._server = ThreadingHTTPServer((host, port), handler_cls)
+        except OSError as exc:
+            self._emit(
+                "adminui.bind_failed",
+                {
+                    "bind": self.spec.bind,
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            self._server = None
+            return
+        self._bound_address = self._server.server_address[:2]
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="recto.adminui",
+            daemon=True,
+        )
+        self._thread.start()
+        self._emit(
+            "adminui.started",
+            {"bind": f"{self._bound_address[0]}:{self._bound_address[1]}"},
+        )
+
+    def stop(self) -> None:
+        """Shut down the server cleanly. Idempotent."""
+        if self._server is None:
+            return
+        try:
+            self._server.shutdown()
+            self._server.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._server = None
+        self._thread = None
+        self._bound_address = None
+
+    def _emit(self, kind: str, ctx: dict[str, Any]) -> None:
+        if self._emit_failure is not None:
+            try:
+                self._emit_failure(kind, ctx)
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _parse_bind(bind: str) -> tuple[str, int]:
+        """Split a 'host:port' string. Defaults to 127.0.0.1:5050."""
+        if ":" not in bind:
+            return "127.0.0.1", 5050
+        host, _, port_s = bind.rpartition(":")
+        try:
+            port = int(port_s)
+        except (TypeError, ValueError):
+            port = 5050
+        return host or "127.0.0.1", port
+   return "127.0.0.1", 5050
         host, _, port_s = bind.rpartition(":")
         try:
             port = int(port_s)

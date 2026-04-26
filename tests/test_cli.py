@@ -892,3 +892,352 @@ class TestApplyDispatch:
         # Critical: the leftover secret value MUST NOT appear in stdout.
         assert "LEFTOVER" not in out.getvalue()
         assert "value" not in out.getvalue().split("(s)")[-1]
+
+
+# ---------------------------------------------------------------------------
+# v0.2.2: --keep-as-env flag for migrate-from-nssm
+# ---------------------------------------------------------------------------
+
+
+class TestPartitionEnvEntries:
+    """Pure data-layer tests for partition_env_entries."""
+
+    def test_no_keep_as_env_routes_everything_to_secrets(self) -> None:
+        from recto._migrate import partition_env_entries
+        entries = [("MY_API_KEY", "secret-value"), ("PYTHONUNBUFFERED", "1")]
+        secrets, plain = partition_env_entries(entries, keep_as_env=None)
+        assert secrets == entries
+        assert plain == []
+
+    def test_explicit_keep_as_env_routes_to_plain(self) -> None:
+        from recto._migrate import partition_env_entries
+        entries = [
+            ("MY_API_KEY", "secret-value"),
+            ("PYTHONUNBUFFERED", "1"),
+            ("LOG_LEVEL", "info"),
+        ]
+        secrets, plain = partition_env_entries(
+            entries, keep_as_env=["PYTHONUNBUFFERED", "LOG_LEVEL"]
+        )
+        assert secrets == [("MY_API_KEY", "secret-value")]
+        assert plain == [("PYTHONUNBUFFERED", "1"), ("LOG_LEVEL", "info")]
+
+    def test_preserves_input_order(self) -> None:
+        from recto._migrate import partition_env_entries
+        entries = [("Z", "1"), ("A", "2"), ("M", "3")]
+        secrets, _ = partition_env_entries(entries, keep_as_env=None)
+        assert [k for k, _ in secrets] == ["Z", "A", "M"]
+
+    def test_unknown_key_in_keep_list_is_silently_ignored(self) -> None:
+        from recto._migrate import partition_env_entries
+        entries = [("FOO", "v")]
+        secrets, plain = partition_env_entries(
+            entries, keep_as_env=["NOT_PRESENT"]
+        )
+        # FOO wasn't in keep list -> goes to secrets. NOT_PRESENT
+        # wasn't in entries -> doesn't appear in plain.
+        assert secrets == [("FOO", "v")]
+        assert plain == []
+
+
+class TestMigrateKeepAsEnvCli:
+    """CLI integration: --keep-as-env flag end-to-end."""
+
+    def test_migrate_with_keep_as_env_routes_to_yaml_env_block(
+        self, tmp_path: Path
+    ) -> None:
+        # NSSM config has both a real secret and a non-secret env var.
+        nssm = FakeNssmClient(
+            config=NssmConfig(
+                service="myservice",
+                app_path="C:\\old\\python.exe",
+                app_parameters="app.py",
+                app_directory="C:\\path\\to\\myservice",
+                app_environment_extra=(
+                    "MY_API_KEY=secret-value",
+                    "PYTHONUNBUFFERED=1",
+                ),
+            )
+        )
+        cred_store: dict[str, str] = {}
+        yaml_out = tmp_path / "out.yaml"
+        out, err = _capture()
+        rc = cli.main(
+            [
+                "migrate-from-nssm",
+                "myservice",
+                "--yaml-out",
+                str(yaml_out),
+                "--keep-as-env",
+                "PYTHONUNBUFFERED",
+            ],
+            nssm_factory=lambda: nssm,
+            credman_factory=lambda svc: FakeCredManSource(svc, cred_store),
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        # MY_API_KEY went to CredMan; PYTHONUNBUFFERED did NOT.
+        assert "recto:myservice:MY_API_KEY" in cred_store
+        assert "recto:myservice:PYTHONUNBUFFERED" not in cred_store
+        # The generated YAML has PYTHONUNBUFFERED in its env: block.
+        text = yaml_out.read_text(encoding="utf-8")
+        assert "  env:" in text
+        assert "    PYTHONUNBUFFERED: \"1\"" in text
+        # And MY_API_KEY in its secrets: block.
+        assert "  secrets:" in text
+        assert "    - name: MY_API_KEY" in text
+        # The plan output (printed to stdout) lists plain env separately.
+        assert "plain_env_to_yaml" in out.getvalue()
+        assert "PYTHONUNBUFFERED" in out.getvalue()
+
+    def test_migrate_no_keep_as_env_keeps_v0_1_behavior(
+        self, tmp_path: Path
+    ) -> None:
+        # Without --keep-as-env, every entry still routes to CredMan.
+        nssm = FakeNssmClient(
+            config=NssmConfig(
+                service="myservice",
+                app_path="C:\\old\\python.exe",
+                app_parameters="app.py",
+                app_directory="C:\\path",
+                app_environment_extra=(
+                    "PYTHONUNBUFFERED=1",
+                    "LOG_LEVEL=info",
+                ),
+            )
+        )
+        cred_store: dict[str, str] = {}
+        yaml_out = tmp_path / "out.yaml"
+        out, err = _capture()
+        rc = cli.main(
+            [
+                "migrate-from-nssm",
+                "myservice",
+                "--yaml-out",
+                str(yaml_out),
+            ],
+            nssm_factory=lambda: nssm,
+            credman_factory=lambda svc: FakeCredManSource(svc, cred_store),
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        # Both went to CredMan -- backward compat preserved.
+        assert "recto:myservice:PYTHONUNBUFFERED" in cred_store
+        assert "recto:myservice:LOG_LEVEL" in cred_store
+        text = yaml_out.read_text(encoding="utf-8")
+        # No env: block in the YAML (every entry is a secret).
+        assert "  env:" not in text
+
+    def test_migrate_keep_as_env_comma_separated(
+        self, tmp_path: Path
+    ) -> None:
+        nssm = FakeNssmClient(
+            config=NssmConfig(
+                service="myservice",
+                app_path="x",
+                app_parameters="a",
+                app_directory="d",
+                app_environment_extra=(
+                    "A=1",
+                    "B=2",
+                    "C=3",
+                    "D=4",
+                ),
+            )
+        )
+        cred_store: dict[str, str] = {}
+        yaml_out = tmp_path / "out.yaml"
+        out, err = _capture()
+        rc = cli.main(
+            [
+                "migrate-from-nssm",
+                "myservice",
+                "--yaml-out",
+                str(yaml_out),
+                "--keep-as-env",
+                "A,C",   # multi-value via comma
+            ],
+            nssm_factory=lambda: nssm,
+            credman_factory=lambda svc: FakeCredManSource(svc, cred_store),
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0
+        # A and C in YAML; B and D in CredMan.
+        text = yaml_out.read_text(encoding="utf-8")
+        assert "    A: \"1\"" in text
+        assert "    C: \"3\"" in text
+        assert "recto:myservice:B" in cred_store
+        assert "recto:myservice:D" in cred_store
+        # And A, C should NOT appear in CredMan.
+        assert "recto:myservice:A" not in cred_store
+        assert "recto:myservice:C" not in cred_store
+
+
+# ---------------------------------------------------------------------------
+# v0.2.2 Gap 4: recto events CLI subcommand
+# ---------------------------------------------------------------------------
+
+
+def _make_apply_yaml_with_admin(tmp_path: Path, *, enabled: bool = True, bind: str = "127.0.0.1:5050") -> Path:
+    """service.yaml that enables (or disables) admin_ui for the events command."""
+    yaml_path = tmp_path / "svc.yaml"
+    if enabled:
+        admin = f"  admin_ui:\n    enabled: true\n    bind: {bind}\n"
+    else:
+        admin = "  admin_ui:\n    enabled: false\n"
+    yaml_path.write_text(
+        "apiVersion: recto/v1\n"
+        "kind: Service\n"
+        "metadata:\n  name: myservice\n"
+        "spec:\n  exec: python.exe\n"
+        + admin,
+        encoding="utf-8",
+    )
+    return yaml_path
+
+
+class TestEventsCommandParsing:
+    def test_events_basic(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["events", "svc.yaml"])
+        assert args.command == "events"
+        assert args.yaml_path == "svc.yaml"
+        assert args.kind is None
+        assert args.limit == 200
+        assert args.restart_history is False
+
+    def test_events_with_kind_and_limit(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["events", "svc.yaml", "--kind", "child.exit", "--limit", "50"]
+        )
+        assert args.kind == "child.exit"
+        assert args.limit == 50
+
+    def test_events_restart_history_flag(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["events", "svc.yaml", "--restart-history"])
+        assert args.restart_history is True
+
+
+class TestEventsCommandDispatch:
+    def test_events_admin_ui_disabled_returns_one(self, tmp_path: Path) -> None:
+        yaml_path = _make_apply_yaml_with_admin(tmp_path, enabled=False)
+        out, err = _capture()
+        rc = cli.main(["events", str(yaml_path)], stdout=out, stderr=err)
+        assert rc == 1
+        assert "admin_ui.enabled is false" in err.getvalue()
+
+    def test_events_invalid_yaml_returns_one(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("apiVersion: recto/v999\nkind: Service\nmetadata:\n  name: x\nspec:\n  exec: x\n")
+        out, err = _capture()
+        rc = cli.main(["events", str(bad)], stdout=out, stderr=err)
+        assert rc == 1
+        assert "invalid config" in err.getvalue()
+
+    def test_events_missing_yaml_returns_one(self, tmp_path: Path) -> None:
+        out, err = _capture()
+        rc = cli.main(
+            ["events", str(tmp_path / "nope.yaml")], stdout=out, stderr=err
+        )
+        assert rc == 1
+        assert "file not found" in err.getvalue()
+
+    def test_events_fetch_url_called_with_correct_url(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml_with_admin(
+            tmp_path, enabled=True, bind="127.0.0.1:5050"
+        )
+        recorded: list[tuple[str, float]] = []
+
+        def fake_fetch(url: str, timeout: float) -> bytes:
+            recorded.append((url, timeout))
+            return b'{"events": [], "count": 0}'
+
+        # Inject fetch_url via a patched _cmd_events (the production
+        # path uses the default _default_fetch_url; tests want the
+        # injection seam).
+        out, err = _capture()
+        # Bypass argparse for direct kwarg injection. Simulate the args
+        # that `recto events <yaml>` would yield.
+        args = cli.build_parser().parse_args(["events", str(yaml_path)])
+        rc = cli._cmd_events(
+            args, out=out, err=err, fetch_url=fake_fetch
+        )
+        assert rc == 0
+        assert len(recorded) == 1
+        url, _timeout = recorded[0]
+        assert url == "http://127.0.0.1:5050/api/events?limit=200"
+
+    def test_events_kind_filter_appends_query_string(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml_with_admin(tmp_path)
+        recorded: list[str] = []
+
+        def fake_fetch(url: str, _timeout: float) -> bytes:
+            recorded.append(url)
+            return b'{"events": []}'
+
+        out, err = _capture()
+        args = cli.build_parser().parse_args(
+            ["events", str(yaml_path), "--kind", "child.spawn,child.exit"]
+        )
+        cli._cmd_events(args, out=out, err=err, fetch_url=fake_fetch)
+        assert recorded[0].endswith("&kind=child.spawn&kind=child.exit")
+
+    def test_events_restart_history_hits_correct_endpoint(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml_with_admin(tmp_path)
+        recorded: list[str] = []
+
+        def fake_fetch(url: str, _timeout: float) -> bytes:
+            recorded.append(url)
+            return b'{"events": []}'
+
+        out, err = _capture()
+        args = cli.build_parser().parse_args(
+            ["events", str(yaml_path), "--restart-history"]
+        )
+        cli._cmd_events(args, out=out, err=err, fetch_url=fake_fetch)
+        assert "/api/restart-history" in recorded[0]
+        assert "/api/events?" not in recorded[0]
+
+    def test_events_unreachable_server_returns_one(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml_with_admin(tmp_path)
+
+        def boom_fetch(_url: str, _t: float) -> bytes:
+            raise ConnectionRefusedError("connection refused")
+
+        out, err = _capture()
+        args = cli.build_parser().parse_args(["events", str(yaml_path)])
+        rc = cli._cmd_events(args, out=out, err=err, fetch_url=boom_fetch)
+        assert rc == 1
+        assert "failed to reach" in err.getvalue()
+        assert "ConnectionRefusedError" in err.getvalue()
+        # Hint user toward NSSM AppStdout log fallback.
+        assert "AppStdout" in err.getvalue()
+
+    def test_events_prints_response_body_to_stdout(
+        self, tmp_path: Path
+    ) -> None:
+        yaml_path = _make_apply_yaml_with_admin(tmp_path)
+
+        def fake_fetch(_url: str, _t: float) -> bytes:
+            return b'{"events": [{"kind": "child.spawn"}], "count": 1}'
+
+        out, err = _capture()
+        args = cli.build_parser().parse_args(["events", str(yaml_path)])
+        rc = cli._cmd_events(args, out=out, err=err, fetch_url=fake_fetch)
+        assert rc == 0
+        body = out.getvalue()
+        assert "child.spawn" in body
+        assert "count" in body

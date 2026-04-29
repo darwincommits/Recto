@@ -63,7 +63,20 @@ jobs:
           echo "pwd: $(pwd)"
           python -m pytest --version
 
+      - name: Make short TMPDIR for AF_UNIX tests
+        # macOS caps AF_UNIX socket paths at 104 chars (vs 108 on
+        # Linux), and pytest's default tmp_path resolves to
+        # /var/folders/zz/.../pytest-of-runner/pytest-N/... which
+        # blows past that — sign_helper tests fail with "OSError:
+        # AF_UNIX path too long". Setting TMPDIR to a short prefix
+        # keeps the paths short. /tmp/r is plenty short and writable
+        # on every macOS runner. Created here once so subsequent
+        # pytest steps just inherit the env var.
+        run: mkdir -p /tmp/r
+
       - name: Run full pytest suite
+        env:
+          TMPDIR: /tmp/r
         run: |
           python -m pytest tests/ -v --tb=short
 
@@ -74,5 +87,7 @@ jobs:
         # applicable gates we just unlocked were ~17 of the ~18
         # Windows skips).
         if: always()
+        env:
+          TMPDIR: /tmp/r
         run: |
           python -m pytest tests/ -q 2>&1 | grep -E "passed|skipped|failed" | tail -3

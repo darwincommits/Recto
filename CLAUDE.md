@@ -207,6 +207,24 @@ operator-specific detail that crept into a public file and move it.
 Generic technical gotchas only. Operator-environment-specific gotchas live
 in `%USERPROFILE%\private\local.md`.
 
+- **macOS's AF_UNIX socket path limit is 104 bytes (Linux is 108).**
+  Tests that bind a Unix socket under `pytest`'s default `tmp_path`
+  fail on macOS CI runners with `OSError: AF_UNIX path too long`
+  because GitHub-hosted macOS runners' default TMPDIR resolves to
+  `/var/folders/zz/...` and pytest layers `pytest-of-runner/
+  pytest-N/test_<name>/<file>` on top — typical paths are
+  120-150 chars. Fix in the workflow YAML: `mkdir -p /tmp/r`,
+  then set `env: TMPDIR: /tmp/r` on every step that runs pytest.
+  pytest's tmp_path_factory honors TMPDIR (it's a thin wrapper
+  over `tempfile`), so this is a CI-only env tweak, no test or
+  production-code change required. The 104-char limit is a
+  BSD-inherited quirk in macOS's `<sys/un.h>` (sockaddr_un.sun_path
+  is 104 bytes); Linux bumped it to 108 in the 2.x kernel era.
+  Caught wave-7 (2026-04-29) on Recto's first GitHub-hosted-macOS
+  pytest run — `test_sign_helper.py` failures cascading from
+  `recto/sign_helper.py:220` socket bind. Same fix applies to any
+  future test that binds Unix sockets via pytest fixtures.
+
 - **Force-push doesn't overwrite when local is a fast-forward descendant
   of remote.** `git push --force` only rewrites remote history if local
   has a different ancestry. If local main is a clean descendant of

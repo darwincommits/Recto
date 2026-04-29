@@ -62,6 +62,18 @@ ethereum = []
    # (BIP39 mnemonic, BIP32/BIP44 derivation, secp256k1 sign with
    # v-recovery) live phone-side in the MAUI Blazor project, NOT in
    # this Python module — private keys never touch the launcher tier.
+bitcoin = []
+   # `pip install recto[bitcoin]` enables the btc_sign credential kind
+   # (recto.bitcoin module: RIPEMD-160 + HASH160, double-SHA-256,
+   # bech32 / bech32m encoding per BIP-173 / BIP-350, BIP-137 signed-
+   # message hashing, P2WPKH / P2PKH / P2SH-P2WPKH address derivation,
+   # BIP-137 compact signature parse + recover). Same posture as the
+   # ethereum extra: pure Python stdlib + a delegation to recto.ethereum
+   # for the secp256k1 verify primitive (same curve). No new packages.
+   # Empty list is intentional. Sign-side primitives live phone-side in
+   # MAUI Blazor under the SAME BIP-39 mnemonic the eth_sign service
+   # uses — one mnemonic, two BIP-44 trees (m/44'/60' for ETH,
+   # m/84'/0' for BTC native SegWit).
 
 [project.urls]
 Homepage = "https://github.com/darwincommits/Recto"

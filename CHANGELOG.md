@@ -7,6 +7,131 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Bitcoin credential kind end-to-end (3 waves, 2026-04-29)
+
+Sister implementation of the Ethereum credential kind shipped
+2026-04-28. Reuses the BIP-39 mnemonic infrastructure (one mnemonic
+per phone, two BIP-44 trees: <c>m/44'/60'</c> for ETH,
+<c>m/84'/0'</c> for BTC native-SegWit P2WPKH default) and the
+secp256k1 ECDSA primitive (same curve). Net-new code: bech32
+encoding (BIP-173), HASH160 + RIPEMD-160 (pure-stdlib in Python,
+BouncyCastle in C#), BIP-137 signed-message hashing, BIP-137
+compact-signature parse + recover. PSBT (BIP-174 transaction
+signing) is reserved for a follow-up; today the message-signing
+verb is wired end-to-end.
+
+**`recto.bitcoin` module + `recto[bitcoin]` extra (Wave 1).** Pure-
+stdlib verify-side primitives mirroring `recto.ethereum`'s structure:
+RIPEMD-160 from-scratch reference impl (Python's
+`hashlib.new("ripemd160")` is OpenSSL-build-dependent and unreliable
+on modern stacks), HASH160, double-SHA-256, bech32/bech32m encoding
++ decoding, public-key compression (64-byte uncompressed →
+33-byte compressed), P2WPKH / P2PKH / P2SH-P2WPKH address
+derivation, BIP-137 signed-message hash, BIP-137 compact-signature
+parse + recover. secp256k1 ECDSA verify is delegated to
+`recto.ethereum.recover_public_key` (same curve). 42 new tests in
+`tests/test_bitcoin.py` against canonical reference vectors:
+RIPEMD-160 paper test vectors, BIP-173 mainnet+testnet
+P2WPKH+P2WSH addresses, HASH160 of generator G →
+`bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4`, BIP-137 sign-then-
+recover round trip with low-s canonicalization.
+
+**Protocol DTO additions in `Recto.Shared.Protocol.V04` (Wave 1).**
+New `BtcSign = "btc_sign"` constant on `PendingRequestKind`; new
+`BtcMessageKind` discriminator class with `MessageSigning` /
+`Psbt` constants; new `BtcNetwork` discriminator class with
+`Mainnet` / `Testnet` / `Signet` / `Regtest`; new BTC-specific
+optional fields on `PendingRequestContext` (`BtcNetwork`,
+`BtcMessageKind`, `BtcAddress`, `BtcDerivationPath`,
+`BtcMessageText`, `BtcPsbtBase64`); new `BtcSignatureBase64` field
+on `RespondRequest` carrying the 65-byte BIP-137 compact signature
+base64-encoded. All additions backward-compatible (optional fields
+default null). `docs/v0.4-protocol.md` "Bitcoin signing capability
+(v0.5+)" section authored.
+
+**Bootloader-side wiring + mock parity (Wave 2).**
+`PendingRequest.new_btc(...)` constructor + 6 optional BTC context
+fields on the dataclass with construction-time validation
+(message-kind, network, per-kind body field, address minimum-
+length sanity check). `recto.bootloader.server`'s
+`_pending_to_wire` emits the BTC fields when `kind == "btc_sign"`
+(omitted for non-BTC kinds — regression-tested); `_handle_respond`
+extracts and structure-checks `btc_signature_base64` on approvals
+(65-byte decode + header byte in 27..42), forwards through
+`_notify_resolved` alongside the existing Ed25519 envelope and ETH
+signature pass-through. Mock bootloader gains a "Queue BTC
+message_sign" operator-UI button that queues a BIP-137 login-style
+message on Bitcoin mainnet at `m/84'/0'/0'/0/0` and recovers the
+signer's bech32 P2WPKH address when the mock is launched from a
+Recto checkout. New tests in `tests/test_bootloader_btc.py`:
+state-level construction validation, persistence round-trip,
+end-to-end live-HTTP exercises with the actual `BootloaderHandler`
+including missing/malformed-sig negative cases, plus a regression
+test that the existing eth_sign path is unaffected.
+
+**Phone-side service + Home.razor approval (Wave 3).**
+`IBtcSignService` interface in `Recto.Shared/Services/`
+(cross-platform contract: `EnsureMnemonicAsync` / `GetAccountAsync`
+/ `ExistsAsync` / `SignMessageAsync` / `ClearAsync`). Surfaces
+`BtcAccount(DerivationPath, Address, Network, AddressKind)` from
+`Recto.Shared/Models/`. `BtcSigningOps` static class in
+`Recto.Shared/Services/` (BouncyCastle-backed math: RIPEMD-160 via
+`RipeMD160Digest`, HASH160, double-SHA-256, varint encoding,
+BIP-137 signed-message hash, public-key compression, bech32
+encoding, P2WPKH address derivation, BIP-137 compact-signature
+sign with deterministic-k ECDSA + low-s canonicalization +
+v-recovery via the Eth recover primitive). `MauiBtcSignService` in
+`Recto/Services/` reads the SAME `recto.phone.eth.mnemonic.{alias}`
+SecureStorage entry as `MauiEthSignService` — one mnemonic, two
+BIP-44 trees, one backup ceremony covers both coins. DI
+registration alongside `IEthSignService` in `MauiProgram.cs`.
+Home.razor render arm with orange BTC badge, network label,
+derivation path, derived address, message text. New
+`ApproveBtcSignAsync` dispatcher producing the dual signature
+(BIP-137 compact base64 via `IBtcSignService` + Ed25519 envelope
+via `IEnclaveKeyService`). New `_btcAddressByRequestId` cache
+populated alongside the ETH cache after every refresh so the
+approval card displays the bech32 address inline before the user
+clicks Approve.
+
+**`Recto.Shared.Tests/BtcSigningOpsTests.cs` +
+`Bip32BtcTests.cs` — ~16 new tests** covering RIPEMD-160 canonical
+vectors, BIP-173 mainnet+testnet P2WPKH addresses, HASH160
+composition, double-SHA-256, public-key compression, P2WPKH
+end-to-end address derivation with rejection of unknown networks,
+BIP-137 signed-message hash determinism, BIP-137 compact signature
+header-byte range + low-s canonicalization + RFC 6979
+determinism. `Bip32BtcTests` covers BIP-84 derivation against the
+canonical "abandon...about" mnemonic (`m/84'/0'/0'/0/0` →
+`bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`) — the cross-wallet
+interop sanity check. Plus a one-mnemonic-two-coins integration
+test that ETH and BTC addresses derived from the same seed are
+both correct.
+
+**Sprint exits when**: cross-wallet interop confirmed live for
+Bitcoin (paste a Recto-produced BIP-137 signature into Bitcoin
+Core's `verifymessage` or any BIP-137-compatible verifier; recover
+the same bech32 address Recto produced). Same posture as the ETH
+sprint exit. Both sprints together complete the cryptocurrency-
+custody story: ~80% of by-market-cap on-chain custody surface,
+all from one phone-resident 24-word mnemonic.
+
+**Still ahead** (follow-ups, non-blocking):
+- **PSBT (BIP-174) signing** — Bitcoin transaction signing.
+  ~400 LOC of partial-signature combine machinery on top of the
+  existing primitives.
+- **P2PKH / P2SH-P2WPKH paths** — wire `m/44'/0'` and `m/49'/0'`
+  purpose levels through `MauiBtcSignService`. The `BtcSigningOps`
+  layer already supports P2PKH and P2SH-P2WPKH address derivation;
+  just needs the dispatch in `DeriveAccount` based on the path's
+  purpose level.
+- **Vault-namespaced storage refactor** — both coin services
+  currently read `recto.phone.eth.mnemonic.{alias}` (misleadingly
+  named post-wave-5). v0.6+ migration path: copy from
+  `recto.phone.eth.mnemonic.{alias}` to
+  `recto.phone.vault.mnemonic.{alias}` on first read, both keys
+  remain readable for one release, then the legacy key is dropped.
+
 ### Added — BIP-39 mnemonic + BIP-32/BIP-44 derivation (sprint fourth wave 2026-04-28)
 
 Promotes the protocol's `eth_derivation_path` field from advisory

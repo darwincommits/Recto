@@ -338,6 +338,17 @@ class BootloaderHandler(BaseHTTPRequestHandler):
                 context["eth_typed_data_json"] = p.eth_typed_data_json
             if p.eth_transaction_json is not None:
                 context["eth_transaction_json"] = p.eth_transaction_json
+        # BTC-specific context fields. Same pattern as ETH — emitted only
+        # for `btc_sign` kind so non-BTC wire shape is unchanged.
+        if p.kind == "btc_sign":
+            context["btc_network"] = p.btc_network
+            context["btc_message_kind"] = p.btc_message_kind
+            context["btc_address"] = p.btc_address
+            context["btc_derivation_path"] = p.btc_derivation_path
+            if p.btc_message_text is not None:
+                context["btc_message_text"] = p.btc_message_text
+            if p.btc_psbt_base64 is not None:
+                context["btc_psbt_base64"] = p.btc_psbt_base64
         return {
             "request_id": p.request_id,
             "kind": p.kind,
@@ -367,6 +378,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             # just marks the pending as resolved-with-denial.
             self._notify_resolved(req, ok=False, signature_b64u=None,
                                   eth_signature_rsv=None,
+                                  btc_signature_base64=None,
                                   reason=body.get("reason", "denied"))
             self._send_json(HTTPStatus.OK, {"resolved": True})
             return
@@ -393,6 +405,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         if not ok:
             self._notify_resolved(req, ok=False, signature_b64u=None,
                                   eth_signature_rsv=None,
+                                  btc_signature_base64=None,
                                   reason="signature verification failed")
             raise BootloaderError("approved-response signature invalid")
         # Extract the Ethereum signature when the kind is eth_sign. Per
@@ -407,6 +420,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             if not isinstance(eth_sig, str) or not eth_sig:
                 self._notify_resolved(req, ok=False, signature_b64u=None,
                                       eth_signature_rsv=None,
+                                      btc_signature_base64=None,
                                       reason="eth_signature_rsv missing on eth_sign approval")
                 raise BootloaderError(
                     "eth_sign approval missing eth_signature_rsv"
@@ -415,6 +429,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             if len(cleaned) != 130:
                 self._notify_resolved(req, ok=False, signature_b64u=None,
                                       eth_signature_rsv=None,
+                                      btc_signature_base64=None,
                                       reason="eth_signature_rsv wrong length")
                 raise BootloaderError(
                     f"eth_signature_rsv must be 130 hex chars after optional 0x prefix, got {len(cleaned)}"
@@ -424,12 +439,56 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._notify_resolved(req, ok=False, signature_b64u=None,
                                       eth_signature_rsv=None,
+                                      btc_signature_base64=None,
                                       reason="eth_signature_rsv not hex")
                 raise BootloaderError(
                     f"eth_signature_rsv must be hex, got {exc}"
                 ) from exc
+        # Same shape for btc_sign: structure-check only, opaque forward.
+        # BIP-137 compact signatures are 65 raw bytes base64-encoded,
+        # which is 88 chars (with padding) or 87 chars (without).
+        # Some encoders strip trailing `=` padding; accept both.
+        btc_sig = None
+        if req.kind == "btc_sign":
+            btc_sig = body.get("btc_signature_base64")
+            if not isinstance(btc_sig, str) or not btc_sig:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      reason="btc_signature_base64 missing on btc_sign approval")
+                raise BootloaderError(
+                    "btc_sign approval missing btc_signature_base64"
+                )
+            try:
+                decoded = base64.b64decode(btc_sig.strip(), validate=False)
+            except Exception as exc:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      reason="btc_signature_base64 not base64")
+                raise BootloaderError(
+                    f"btc_signature_base64 must be valid base64, got {exc}"
+                ) from exc
+            if len(decoded) != 65:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      reason="btc_signature_base64 wrong decoded length")
+                raise BootloaderError(
+                    f"btc_signature_base64 must decode to 65 bytes, got {len(decoded)}"
+                )
+            header = decoded[0]
+            if header < 27 or header > 42:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      reason="btc_signature_base64 header byte out of range")
+                raise BootloaderError(
+                    f"BIP-137 header byte must be in 27..42, got {header}"
+                )
         self._notify_resolved(req, ok=True, signature_b64u=sig,
-                              eth_signature_rsv=eth_sig, reason=None)
+                              eth_signature_rsv=eth_sig,
+                              btc_signature_base64=btc_sig, reason=None)
         self._send_json(HTTPStatus.OK, {"resolved": True})
 
     def _notify_resolved(
@@ -440,6 +499,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         signature_b64u: str | None,
         reason: str | None,
         eth_signature_rsv: str | None = None,
+        btc_signature_base64: str | None = None,
     ) -> None:
         """Surface a request resolution to the waiting launcher.
 
@@ -449,18 +509,34 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         the BootloaderConfig and tests inject their own callable.
 
         ``eth_signature_rsv`` is populated only when ``req.kind ==
-        "eth_sign"`` and the operator approved; the launcher forwards
-        the rsv hex to the consumer (smart contract / off-chain
-        verifier) without further validation. ``signature_b64u`` is
-        the Ed25519 paired-phone identity proof and is populated for
-        every approval regardless of kind.
+        "eth_sign"`` and the operator approved; ``btc_signature_base64``
+        only when ``req.kind == "btc_sign"`` and approved. The launcher
+        forwards both to the consumer (smart contract / off-chain
+        verifier / wallet performing on-chain verification) without
+        further validation. ``signature_b64u`` is the Ed25519
+        paired-phone identity proof and is populated for every approval
+        regardless of kind.
         """
         notify_fn = getattr(self.config, "notify_resolved_fn", None)
         if notify_fn is not None:
             # Be tolerant of older notify_fn signatures that don't
-            # accept the eth_signature_rsv kwarg — fall back to
-            # calling without it. Tests injected before the ETH batch
-            # may use 4-arg signatures; we don't want to break them.
+            # accept the new kwargs. Try the full signature first; if
+            # the callable doesn't accept btc_signature_base64, retry
+            # without it (eth-only signatures from the wave-2 batch);
+            # if it doesn't accept eth_signature_rsv either, retry with
+            # only the v0.4.0 base 4-arg shape.
+            try:
+                notify_fn(
+                    req=req,
+                    ok=ok,
+                    signature_b64u=signature_b64u,
+                    eth_signature_rsv=eth_signature_rsv,
+                    btc_signature_base64=btc_signature_base64,
+                    reason=reason,
+                )
+                return
+            except TypeError:
+                pass
             try:
                 notify_fn(
                     req=req,
@@ -469,9 +545,11 @@ class BootloaderHandler(BaseHTTPRequestHandler):
                     eth_signature_rsv=eth_signature_rsv,
                     reason=reason,
                 )
+                return
             except TypeError:
-                notify_fn(req=req, ok=ok, signature_b64u=signature_b64u,
-                          reason=reason)
+                pass
+            notify_fn(req=req, ok=ok, signature_b64u=signature_b64u,
+                      reason=reason)
 
     # ------------------------------------------------------------------
     # Helpers

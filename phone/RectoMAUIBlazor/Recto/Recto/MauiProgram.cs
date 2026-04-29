@@ -56,6 +56,12 @@ public static class MauiProgram
         // StrongBox don't support secp256k1, so the software impl IS the
         // correct long-term implementation).
         builder.Services.AddSingleton<IEthSignService, MauiEthSignService>();
+        // v0.5+ Bitcoin signing capability. Reads the SAME BIP-39
+        // mnemonic the ETH service reads (one mnemonic per phone, two
+        // BIP-44 trees: m/44'/60' for ETH, m/84'/0' for BTC native
+        // SegWit). BIP-137 message_signing verb is wired today; PSBT
+        // (BIP-174 transaction signing) is reserved for a follow-up.
+        builder.Services.AddSingleton<IBtcSignService, MauiBtcSignService>();
         // v0.4.1 user preferences (polling interval, history limit, theme).
         // MAUI Preferences-backed (not SecureStorage; not secret).
         builder.Services.AddSingleton<IUserPreferencesService, MauiUserPreferencesService>();

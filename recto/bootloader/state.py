@@ -188,6 +188,19 @@ class PendingRequest:
     eth_typed_data_json: str | None = None  # for typed_data (EIP-712)
     eth_transaction_json: str | None = None  # for transaction (RLP) — reserved
 
+    # BTC-specific context (kind == "btc_sign"). All optional with
+    # default None. Six fields mirror the C# `PendingRequestContext`
+    # BTC additions in `Recto.Shared.Protocol.V04`. See
+    # `docs/v0.4-protocol.md` "Bitcoin signing capability (v0.5+)".
+    # Same secp256k1 curve as ETH; different BIP-44 path tree
+    # (m/84'/0'/0'/0/N for native-SegWit P2WPKH).
+    btc_network: str | None = None  # "mainnet" | "testnet" | "signet" | "regtest"
+    btc_message_kind: str | None = None  # "message_signing" | "psbt"
+    btc_address: str | None = None  # bech32 (P2WPKH) or Base58Check (legacy / nested)
+    btc_derivation_path: str | None = None  # default "m/84'/0'/0'/0/0"
+    btc_message_text: str | None = None  # for message_signing
+    btc_psbt_base64: str | None = None  # for psbt (BIP-174) — reserved
+
     @classmethod
     def new(
         cls,
@@ -297,6 +310,90 @@ class PendingRequest:
             eth_message_text=eth_message_text,
             eth_typed_data_json=eth_typed_data_json,
             eth_transaction_json=eth_transaction_json,
+        )
+
+    @classmethod
+    def new_btc(
+        cls,
+        *,
+        service: str,
+        secret: str,
+        phone_id: str,
+        operation_description: str,
+        payload_hash_b64u: str,
+        child_pid: int,
+        child_argv0: str,
+        btc_network: str,
+        btc_message_kind: str,
+        btc_address: str,
+        btc_derivation_path: str = "m/84'/0'/0'/0/0",
+        btc_message_text: str | None = None,
+        btc_psbt_base64: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> PendingRequest:
+        """Construct a ``btc_sign`` PendingRequest with the six
+        Bitcoin-specific context fields populated.
+
+        Validates that ``btc_message_kind`` is one of the two
+        protocol-defined values (``message_signing`` or ``psbt``),
+        the ``btc_network`` is one of the four recognized networks,
+        and exactly one of the two per-kind body fields
+        (``btc_message_text`` / ``btc_psbt_base64``) is populated to
+        match. Raises ``ValueError`` on any failure; consumers (the
+        launcher, the mock bootloader operator-UI) are expected to
+        validate at construction time so a malformed request never
+        lands on the queue.
+        """
+        if btc_message_kind not in ("message_signing", "psbt"):
+            raise ValueError(
+                f"btc_message_kind must be one of 'message_signing'|'psbt', "
+                f"got {btc_message_kind!r}"
+            )
+        if btc_network not in ("mainnet", "testnet", "signet", "regtest"):
+            raise ValueError(
+                f"btc_network must be one of "
+                f"'mainnet'|'testnet'|'signet'|'regtest', got {btc_network!r}"
+            )
+        body_fields = {
+            "message_signing": btc_message_text,
+            "psbt": btc_psbt_base64,
+        }
+        expected = body_fields[btc_message_kind]
+        if expected is None or expected == "":
+            field_name = {
+                "message_signing": "btc_message_text",
+                "psbt": "btc_psbt_base64",
+            }[btc_message_kind]
+            raise ValueError(
+                f"btc_message_kind={btc_message_kind!r} requires {field_name} to be set"
+            )
+        if not btc_address or len(btc_address) < 14:
+            # Loose minimum length sanity-check; full bech32 / Base58Check
+            # validation happens phone-side during the BIP-32 derivation.
+            # P2WPKH bech32 is ~42 chars, P2PKH Base58Check is 26-35 chars,
+            # so 14 is a safe floor that catches obvious mistakes.
+            raise ValueError(
+                f"btc_address must be at least 14 chars, got {btc_address!r}"
+            )
+        now = int(time.time())
+        return cls(
+            request_id=str(uuid.uuid4()),
+            kind="btc_sign",
+            service=service,
+            secret=secret,
+            phone_id=phone_id,
+            operation_description=operation_description,
+            payload_hash_b64u=payload_hash_b64u,
+            child_pid=child_pid,
+            child_argv0=child_argv0,
+            requested_at_unix=now,
+            expires_at_unix=now + ttl_seconds,
+            btc_network=btc_network,
+            btc_message_kind=btc_message_kind,
+            btc_address=btc_address.strip(),
+            btc_derivation_path=btc_derivation_path,
+            btc_message_text=btc_message_text,
+            btc_psbt_base64=btc_psbt_base64,
         )
 
     @property

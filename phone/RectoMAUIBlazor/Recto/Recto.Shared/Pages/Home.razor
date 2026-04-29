@@ -13,6 +13,7 @@
 @inject IEnclaveKeyService EnclaveKeys
 @inject ITotpService Totp
 @inject IEthSignService EthSigner
+@inject IBtcSignService BtcSigner
 @inject IPinningService Pinning
 @inject IPairingStateService Pairing
 @inject IPushTokenService PushTokens
@@ -241,6 +242,39 @@
                                             </p>
                                             <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
                                             break;
+                                        case PendingRequestKind.BtcSign:
+                                            <p class="mb-1 fw-semibold">
+                                                <span class="badge me-1" style="background-color: #f7931a; color: white;">BTC</span>@(_btcMessageKindLabel(req.Context.BtcMessageKind))
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Network: <code>@(_btcNetworkLabel(req.Context.BtcNetwork))</code>
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Path: <code>@(req.Context.BtcDerivationPath ?? "m/84'/0'/0'/0/0")</code>
+                                            </p>
+                                            @if (_btcAddressByRequestId.TryGetValue(req.RequestId, out var btcDerivedAddr))
+                                            {
+                                                <p class="mb-1 text-muted small" style="word-break: break-all;">
+                                                    Address: <code>@btcDerivedAddr</code>
+                                                </p>
+                                            }
+                                            @if (req.Context.BtcMessageKind == BtcMessageKind.MessageSigning && !string.IsNullOrEmpty(req.Context.BtcMessageText))
+                                            {
+                                                <p class="mb-2 text-muted small" style="white-space: pre-wrap; word-break: break-word;">
+                                                    <strong>Message:</strong> @req.Context.BtcMessageText
+                                                </p>
+                                            }
+                                            else if (req.Context.BtcMessageKind == BtcMessageKind.Psbt && !string.IsNullOrEmpty(req.Context.BtcPsbtBase64))
+                                            {
+                                                <p class="mb-2 text-muted small" style="white-space: pre-wrap; word-break: break-word;">
+                                                    <strong>PSBT:</strong> <code>@TruncateHash(req.Context.BtcPsbtBase64)</code>
+                                                </p>
+                                            }
+                                            else
+                                            {
+                                                <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
+                                            }
+                                            break;
                                         case PendingRequestKind.EthSign:
                                             <p class="mb-1 fw-semibold">
                                                 <span class="badge bg-warning text-dark me-1">ETH</span>@(_ethMessageKindLabel(req.Context.EthMessageKind))
@@ -459,6 +493,11 @@
     // multi-account UI can pick alternative aliases (e.g. "trading",
     // "longterm", "thru-governance") to give each its own mnemonic.
     private const string EthKeyAlias = "default";
+    // Wave-5: BTC service shares the same SecureStorage entry as ETH
+    // (one mnemonic per phone, two BIP-44 trees). The alias here is
+    // the same as EthKeyAlias on purpose. Future v0.6+ vault refactor
+    // will collapse both into a single VaultAlias.
+    private const string BtcKeyAlias = "default";
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3);
 
     // Dev default points at the mock bootloader (phone/dev-tools/mock-bootloader.py).
@@ -478,6 +517,10 @@
     // BIP-39 + BIP-32 + secp256k1 (~2-5ms on Windows; trivial). Cleared
     // when _pending is replaced so stale entries don't leak.
     private Dictionary<string, string> _ethAddressByRequestId = new();
+    // Wave-5: same pattern for BTC. Pre-derived bech32 P2WPKH addresses
+    // (or Base58Check legacy / nested-SegWit when those purpose levels
+    // are eventually wired) for pending btc_sign requests.
+    private Dictionary<string, string> _btcAddressByRequestId = new();
     private string? _processingRequestId;
     private string _processingText = string.Empty;
     private string? _pollingError;
@@ -710,6 +753,9 @@
                 case PendingRequestKind.EthSign:
                     await ApproveEthSignAsync(req);
                     break;
+                case PendingRequestKind.BtcSign:
+                    await ApproveBtcSignAsync(req);
+                    break;
                 default:
                     _pollingError = $"Cannot approve unknown request kind '{req.Kind}'.";
                     break;
@@ -721,6 +767,96 @@
             _processingText = string.Empty;
             StateHasChanged();
         }
+    }
+
+    private async Task ApproveBtcSignAsync(PendingRequest req)
+    {
+        // Validate BTC-specific context before either crypto path runs.
+        // Today only message_signing is wired end-to-end on the phone
+        // side; psbt earns its own approval method when BIP-174 lands.
+        var msgKind = req.Context.BtcMessageKind;
+        if (string.IsNullOrEmpty(msgKind))
+        {
+            _pollingError = "btc_sign request missing btc_message_kind.";
+            return;
+        }
+        if (msgKind != BtcMessageKind.MessageSigning)
+        {
+            _pollingError = $"btc_sign kind '{msgKind}' is not yet implemented; only message_signing is wired today.";
+            return;
+        }
+        if (string.IsNullOrEmpty(req.Context.BtcMessageText))
+        {
+            _pollingError = "btc_sign message_signing request missing btc_message_text.";
+            return;
+        }
+        if (string.IsNullOrEmpty(req.Context.PayloadHashB64u))
+        {
+            _pollingError = "btc_sign request missing payload_hash_b64u (Ed25519 envelope binding).";
+            return;
+        }
+
+        var derivationPath = string.IsNullOrEmpty(req.Context.BtcDerivationPath)
+            ? "m/84'/0'/0'/0/0"
+            : req.Context.BtcDerivationPath!;
+        var network = string.IsNullOrEmpty(req.Context.BtcNetwork)
+            ? "mainnet"
+            : req.Context.BtcNetwork!;
+
+        _processingText = "Signing with BTC key...";
+        StateHasChanged();
+        await Task.Yield();
+
+        // Phone produces TWO signatures (same shape as eth_sign):
+        //   (a) BIP-137 compact secp256k1 signature over the BIP-137
+        //       hash of the message, returned in
+        //       RespondRequest.BtcSignatureBase64. Opaque to the
+        //       bootloader; consumed by the smart contract / off-chain
+        //       verifier / wallet performing on-chain verification.
+        //   (b) Ed25519 over the bootloader-supplied payload_hash_b64u,
+        //       returned in RespondRequest.SignatureB64u. Proves the
+        //       response came from the paired phone — same envelope
+        //       eth_sign / single_sign use.
+        var signResult = await BtcSigner.SignMessageAsync(
+            BtcKeyAlias, derivationPath, network, req.Context.BtcMessageText!, CancellationToken.None);
+        if (signResult.IsFailure)
+        {
+            _pollingError = signResult.Error.Message;
+            return;
+        }
+        var compactSigBase64 = signResult.Value;
+
+        byte[] payloadHash;
+        try { payloadHash = Base64UrlDecode(req.Context.PayloadHashB64u!); }
+        catch (Exception ex)
+        {
+            _pollingError = $"Could not decode payload hash: {ex.Message}";
+            return;
+        }
+        _processingText = "Awaiting biometric...";
+        StateHasChanged();
+        var enclaveSignResult = await EnclaveKeys.SignAsync(KeyAlias, payloadHash, CancellationToken.None);
+        if (enclaveSignResult.IsFailure)
+        {
+            _pollingError = enclaveSignResult.Error.Message;
+            return;
+        }
+
+        _processingText = "Sending response...";
+        StateHasChanged();
+        var respondReq = new RespondRequest(
+            PhoneId: _paired!.PhoneId,
+            Decision: RespondDecision.Approved,
+            SignatureB64u: Base64UrlEncode(enclaveSignResult.Value),
+            BtcSignatureBase64: compactSigBase64);
+        var respondResult = await BootloaderClient.RespondAsync(
+            _paired.BootloaderUrl, req.RequestId, respondReq, CancellationToken.None);
+        if (respondResult.IsFailure)
+        {
+            _pollingError = respondResult.Error.Message;
+            return;
+        }
+        await RefreshPendingAsync(CancellationToken.None);
     }
 
     private async Task ApproveEthSignAsync(PendingRequest req)
@@ -1209,6 +1345,7 @@
             _pending = result.Value.Requests.ToList();
             _pollingError = null;
             await PopulateEthAddressesAsync(_pending, ct);
+            await PopulateBtcAddressesAsync(_pending, ct);
         }
         else
         {
@@ -1240,6 +1377,34 @@
             }
         }
         _ethAddressByRequestId = newMap;
+    }
+
+    /// <summary>
+    /// Wave-5 sibling of PopulateEthAddressesAsync. Runs once per
+    /// refresh; for each pending btc_sign request, derives the
+    /// network-and-path-specific Bitcoin address (bech32 P2WPKH for
+    /// the m/84' purpose level) so the render arm can display
+    /// "Address: bc1q..." inline without doing async work in markup.
+    /// </summary>
+    private async Task PopulateBtcAddressesAsync(List<PendingRequest> pending, CancellationToken ct)
+    {
+        var newMap = new Dictionary<string, string>();
+        foreach (var req in pending)
+        {
+            if (req.Kind != PendingRequestKind.BtcSign) continue;
+            var path = string.IsNullOrEmpty(req.Context.BtcDerivationPath)
+                ? "m/84'/0'/0'/0/0"
+                : req.Context.BtcDerivationPath!;
+            var network = string.IsNullOrEmpty(req.Context.BtcNetwork)
+                ? "mainnet"
+                : req.Context.BtcNetwork!;
+            var account = await BtcSigner.EnsureMnemonicAsync(BtcKeyAlias, path, network, ct);
+            if (account.IsSuccess)
+            {
+                newMap[req.RequestId] = account.Value.Address;
+            }
+        }
+        _btcAddressByRequestId = newMap;
     }
 
     private async Task HandleRetryPollAsync()
@@ -1368,5 +1533,22 @@
         42161 => "Arbitrum One (42161)",
         null => "(unspecified)",
         _ => $"chain {chainId}",
+    };
+
+    private static string _btcMessageKindLabel(string? kind) => kind switch
+    {
+        BtcMessageKind.MessageSigning => "Sign message (BIP-137)",
+        BtcMessageKind.Psbt => "Sign PSBT (BIP-174)",
+        _ => "BTC sign",
+    };
+
+    private static string _btcNetworkLabel(string? network) => network switch
+    {
+        BtcNetwork.Mainnet => "Bitcoin mainnet",
+        BtcNetwork.Testnet => "Bitcoin testnet",
+        BtcNetwork.Signet => "Bitcoin signet",
+        BtcNetwork.Regtest => "Bitcoin regtest",
+        null => "(unspecified)",
+        _ => network!,
     };
 }

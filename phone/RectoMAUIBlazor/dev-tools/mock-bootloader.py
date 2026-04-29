@@ -1317,6 +1317,60 @@ class Handler(BaseHTTPRequestHandler):
             send_push_wakeup(target_phone, request_id, "pgp_sign")
             self._send_redirect("/")
             return
+        if url.path == "/_queue_btc_message_sign":
+            # v0.5+ BTC message_signing request. Mints a fixed login-style
+            # message, queues a btc_sign PendingRequest with the six BTC
+            # context fields, and returns. The phone derives the
+            # secp256k1 key from the SAME BIP-39 mnemonic the ETH
+            # service uses at the default m/84'/0'/0'/0/0 path
+            # (native-SegWit P2WPKH), computes the BIP-137 hash, signs
+            # both the BIP-137 digest AND the standard payload_hash_b64u
+            # (Ed25519 envelope), and POSTs back via /v0.4/respond/<id>.
+            with STATE._lock:
+                target_phone = STATE.registered[-1] if STATE.registered else None
+            if target_phone is None:
+                self._send_redirect("/")
+                return
+            request_id = str(uuid.uuid4())
+            payload_hash = secrets.token_bytes(32)
+            # Placeholder address — phone overwrites with the real bech32
+            # P2WPKH address it derives. Mock recovers the actual signer
+            # from the BIP-137 sig and surfaces it inline (see the
+            # btc_sign branch in the respond handler). Real production
+            # launchers would pin the expected address from a
+            # service.yaml entry; this is dev-tooling and stays loose.
+            placeholder_address = "bc1qplaceholder0000000000000000000000000"
+            network = "mainnet"
+            message_text = (
+                f"Login to demo.recto.example "
+                f"at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} (BTC)"
+            )
+            with STATE._lock:
+                STATE.pending_requests[request_id] = {
+                    "request_id": request_id,
+                    "kind": "btc_sign",
+                    "service": "demo.recto.example",
+                    "secret": "btc-wallet-login",
+                    "context": {
+                        "child_pid": secrets.randbelow(60000) + 1000,
+                        "child_argv0": "browser",
+                        "requested_at_unix": int(time.time()),
+                        "operation_description": f"BTC message_signing: {message_text!r}",
+                        "payload_hash_b64u": b64u_encode(payload_hash),
+                        # The six BTC context fields per the protocol RFC.
+                        "btc_network": network,
+                        "btc_message_kind": "message_signing",
+                        "btc_address": placeholder_address,
+                        "btc_derivation_path": "m/84'/0'/0'/0/0",
+                        "btc_message_text": message_text,
+                    },
+                    "_phone_id": target_phone["phone_id"],
+                    "_queued_at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                }
+            send_push_wakeup(target_phone, request_id, "btc_sign")
+            self._send_redirect("/")
+            return
+
         if url.path == "/_queue_eth_personal_sign":
             # v0.5+ ETH personal_sign request. Mints a fixed login-style
             # message, queues an eth_sign PendingRequest with the seven
@@ -1686,6 +1740,10 @@ class Handler(BaseHTTPRequestHandler):
             # signature itself — that's the consumer's job (smart contract /
             # off-chain verifier). We just structure-check + stash for display.
             eth_signature_rsv = body.get("eth_signature_rsv")
+            # v0.5+ BTC: opaque BIP-137 compact signature (65 bytes
+            # base64-encoded) the phone produced over the BIP-137
+            # signed-message hash. Same opaque-forwarding posture as ETH.
+            btc_signature_base64 = body.get("btc_signature_base64")
 
             if not phone_id or not decision:
                 self._send_json(400, {"error": "phone_id and decision are required"})
@@ -1877,6 +1935,95 @@ class Handler(BaseHTTPRequestHandler):
                         # — needs the EIP-712 / RLP hash computed here.
                     except Exception as ex:  # noqa: BLE001
                         extra_response_fields["eth_recovery_error"] = str(ex)
+                elif kind == "btc_sign":
+                    # v0.5+ Bitcoin signing capability. Same shape as
+                    # eth_sign: phone derives a secp256k1 private key from
+                    # its BIP-39 mnemonic at the requested BIP-32 path
+                    # (default m/84'/0'/0'/0/0 native-SegWit), computes
+                    # the BIP-137 hash of the signed-message preimage,
+                    # signs, and returns the 65-byte BIP-137 compact
+                    # signature base64-encoded. The phone ALSO Ed25519-
+                    # signs the standard payload_hash_b64u so the
+                    # bootloader proves response provenance.
+                    if not signature_b64u:
+                        self._send_json(400, {"error": "btc_sign approval requires signature_b64u (Ed25519 envelope)"})
+                        return
+                    if not btc_signature_base64:
+                        self._send_json(400, {"error": "btc_sign approval requires btc_signature_base64"})
+                        return
+                    try:
+                        decoded_btc_sig = base64.b64decode(btc_signature_base64.strip(), validate=False)
+                    except Exception as ex:
+                        self._send_json(400, {"error": f"btc_signature_base64 not valid base64: {ex}"})
+                        return
+                    if len(decoded_btc_sig) != 65:
+                        self._send_json(400, {
+                            "error": f"btc_signature_base64 must decode to 65 bytes, got {len(decoded_btc_sig)}",
+                        })
+                        return
+                    btc_header = decoded_btc_sig[0]
+                    if btc_header < 27 or btc_header > 42:
+                        self._send_json(400, {
+                            "error": f"BIP-137 header byte must be in 27..42, got {btc_header}",
+                        })
+                        return
+                    if STATE.verify_signatures:
+                        try:
+                            pub = b64u_decode(phone["public_key_b64u"])
+                            sig = b64u_decode(signature_b64u)
+                            payload = b64u_decode(pending["context"]["payload_hash_b64u"])
+                        except Exception as ex:
+                            self._send_json(400, {"error": f"base64url decode failed: {ex}"})
+                            return
+                        verified = verify_signature(phone["algorithm"], pub, payload, sig)
+                        if not verified:
+                            self._send_json(400, {
+                                "error": f"{phone['algorithm']} envelope signature does not verify "
+                                         f"against the registered public key for this phone",
+                            })
+                            return
+                    else:
+                        verified = True
+                    extra_response_fields["btc_signature_base64"] = btc_signature_base64
+                    extra_response_fields["btc_network"] = pending["context"].get("btc_network")
+                    extra_response_fields["btc_message_kind"] = pending["context"].get("btc_message_kind")
+                    extra_response_fields["btc_address"] = pending["context"].get("btc_address")
+                    extra_response_fields["btc_message_text"] = pending["context"].get("btc_message_text")
+                    # Best-effort signer-address recovery — purely
+                    # informational. If recto.bitcoin is on PYTHONPATH
+                    # (mock running from inside the Recto checkout),
+                    # recover the signer address from the BIP-137 compact
+                    # sig and surface inline. Failure here is non-fatal;
+                    # the protocol RFC says the bootloader doesn't
+                    # validate the secp256k1 sig.
+                    try:
+                        from recto.bitcoin import (
+                            signed_message_hash as _btc_msg_hash,
+                            recover_address as _btc_recover_addr,
+                        )
+
+                        msg_kind_btc = pending["context"].get("btc_message_kind")
+                        network_btc = pending["context"].get("btc_network", "mainnet")
+                        if msg_kind_btc == "message_signing":
+                            msg_text_btc = pending["context"].get("btc_message_text", "")
+                            digest_btc = _btc_msg_hash(msg_text_btc.encode("utf-8"))
+                            recovered_btc = _btc_recover_addr(digest_btc, btc_signature_base64, network=network_btc)
+                            extra_response_fields["btc_recovered_address"] = recovered_btc
+                            expected_addr_btc = (pending["context"].get("btc_address") or "").lower()
+                            # Suppress the match comparison when the queued
+                            # address is a placeholder (operator-UI default
+                            # for phones that haven't pre-registered an
+                            # address). Same heuristic as the ETH path.
+                            placeholder_btc = {"", "bc1qplaceholder", "bc1qplaceholder0000000000000000000000000"}
+                            if expected_addr_btc in placeholder_btc or expected_addr_btc.startswith("bc1qplaceholder"):
+                                pass  # leave btc_address_match unset; UI shows recovered without marker
+                            else:
+                                extra_response_fields["btc_address_match"] = (
+                                    recovered_btc.lower() == expected_addr_btc
+                                )
+                        # psbt recovery is a follow-up — needs full BIP-174 parse.
+                    except Exception as ex:  # noqa: BLE001
+                        extra_response_fields["btc_recovery_error"] = str(ex)
                 elif kind == "webauthn_assert":
                     missing = [
                         name for name, val in [
@@ -2032,6 +2179,21 @@ def render_index() -> str:
                 f"<span class='dim'>ETH {msg_kind}</span> "
                 f"<code>chain {chain_id}</code>"
             )
+        if kind == "btc_sign":
+            msg_kind = r["context"].get("btc_message_kind", "?")
+            network = r["context"].get("btc_network", "?")
+            if msg_kind == "message_signing":
+                msg_text = r["context"].get("btc_message_text", "") or ""
+                preview = msg_text if len(msg_text) <= 64 else msg_text[:61] + "..."
+                return (
+                    f"<span class='dim'>BTC {msg_kind}</span> "
+                    f"<code>{network}</code> "
+                    f"&mdash; <code>{preview}</code>"
+                )
+            return (
+                f"<span class='dim'>BTC {msg_kind}</span> "
+                f"<code>{network}</code>"
+            )
         return f"<span class='dim'>sign</span> <code>{r['service']}</code>/<code>{r['secret']}</code>"
 
     pending_html = "".join(
@@ -2154,6 +2316,52 @@ def render_index() -> str:
                 f"{msg_text_html}"
                 f"{rsv_full_html}"
             )
+        if kind == "btc_sign":
+            btc_sig = r.get("btc_signature_base64") or ""
+            btc_sig_short = (
+                btc_sig[:10] + "&hellip;" + btc_sig[-6:]
+                if len(btc_sig) > 22 else btc_sig
+            )
+            network_btc = r.get("btc_network", "?")
+            msg_kind_btc = r.get("btc_message_kind", "?")
+            recovered_btc = r.get("btc_recovered_address")
+            msg_text_btc = r.get("btc_message_text") or ""
+            recovery_html_btc = ""
+            if recovered_btc:
+                if r.get("btc_address_match") is True:
+                    recovery_html_btc = (
+                        f" &mdash; recovered <code>{recovered_btc}</code> "
+                        f"<span class='verified'>matches expected</span>"
+                    )
+                elif r.get("btc_address_match") is False:
+                    expected = r.get("btc_address") or "?"
+                    recovery_html_btc = (
+                        f" &mdash; recovered <code>{recovered_btc}</code> "
+                        f"<span class='warn'>differs from expected {expected}</span>"
+                    )
+                else:
+                    recovery_html_btc = f" &mdash; recovered <code>{recovered_btc}</code>"
+            elif r.get("btc_recovery_error"):
+                recovery_html_btc = (
+                    f" &mdash; <span class='warn'>"
+                    f"address recovery failed: {r.get('btc_recovery_error')}</span>"
+                )
+            msg_text_html_btc = (
+                f"<br><span class='dim'>msg:</span> <code>{msg_text_btc}</code>"
+                if msg_text_btc else ""
+            )
+            sig_full_html_btc = (
+                f"<br><span class='dim'>sig (full base64):</span> "
+                f"<code style='word-break: break-all;'>{btc_sig}</code>"
+                if btc_sig else ""
+            )
+            return (
+                f"<strong>approved</strong> &mdash; BTC {msg_kind_btc} "
+                f"<code>{network_btc}</code>, sig <code>{btc_sig_short}</code>"
+                f"{recovery_html_btc} &mdash; {verify_marker}"
+                f"{msg_text_html_btc}"
+                f"{sig_full_html_btc}"
+            )
         return f"<strong>approved</strong> &mdash; kind <code>{kind}</code> &mdash; {verify_marker}"
 
     responses_html = "".join(
@@ -2246,6 +2454,9 @@ def render_index() -> str:
 <form method="post" action="/_queue_eth_personal_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH personal_sign</button>
 </form>
+<form method="post" action="/_queue_btc_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue BTC message_sign</button>
+</form>
 <div class="dim" style="font-size: 0.85rem; margin-top: 0.4rem;">
   Sign request targets the most-recently-registered phone with a random managed secret.
   TOTP provision mints a fresh random base32 secret and stores it server-side for later code verification.
@@ -2257,6 +2468,10 @@ def render_index() -> str:
   ETH personal_sign mints an EIP-191 login-style message on Base (chain 8453) and asks the phone
   to sign with a secp256k1 key derived from its BIP39 mnemonic at <code>m/44'/60'/0'/0/0</code>;
   the mock recovers the signer address from the returned r||s||v and surfaces it for inspection.
+  BTC message_sign mints a BIP-137 login-style message on Bitcoin mainnet and asks the phone to
+  sign with a secp256k1 key derived from the SAME mnemonic at <code>m/84'/0'/0'/0/0</code>
+  (native-SegWit P2WPKH); the mock recovers the bech32 <code>bc1q...</code> address from the
+  returned compact signature and surfaces it for inspection.
 </div>
 
 <h2>Provisioned TOTP aliases</h2>

@@ -378,15 +378,106 @@ read that file in addition to this one.
   passing through `.env` or `AppEnvironmentExtra`; that's the
   expected default for any new secret going forward.
 
-## Active sprint — Bitcoin credential kind (next session 2026-04-29)
+## Active sprint — none (cryptocurrency-custody story complete)
 
-Ethereum credential kind shipped end-to-end 2026-04-28 (four waves,
-landed + tested on live TLS-pinned Windows MAUI build, cross-wallet
-interop confirmed via canonical EIP-191 signature recovery in Python
-+ MyCrypto, Trezor BIP-32 reference vector passing). Bitcoin is the
-sister implementation that picks up next session — same BIP-39
-mnemonic infrastructure, same BIP-32 derivation, same secp256k1
-signing, different paths + address encoding + signing format.
+Both Ethereum (2026-04-28) and Bitcoin (2026-04-29) credential
+kinds shipped end-to-end. The Recto vault now holds one BIP-39
+mnemonic that derives both an Ethereum address tree
+(<c>m/44'/60'/0'/0/N</c>) and a Bitcoin native-SegWit P2WPKH
+address tree (<c>m/84'/0'/0'/0/N</c>) — together covering ~80%
+of by-market-cap on-chain custody surface. Cross-wallet
+interop confirmed for ETH live (MyCrypto + Python verifier);
+BTC interop pending Erik's first end-to-end smoke test from
+Windows. Reference vectors pinned in tests for both:
+"abandon...about" → 0x9858EfFD... (ETH) and
+bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu (BTC).
+
+**Next directions** — pick what's most valuable when you're ready
+to push forward:
+- **PSBT (BIP-174) signing** — Bitcoin transaction signing.
+  ~400 LOC; closes the "send Bitcoin from Recto" loop.
+- **EIP-712 typed-data + RLP transaction signing** — same shape
+  for Ethereum. Login-with-Ethereum + actually-send-ETH paths.
+- **Mnemonic export ceremony** — biometric-gated one-time-display
+  UI so operators can back up the 24 words. Today the mnemonic
+  is generated but never shown; loss of the phone = loss of all
+  addresses.
+- **Mnemonic import ceremony** — paste an existing mnemonic
+  (e.g. from a Ledger recovery phrase) and have Recto re-derive.
+- **Multi-account picker** — Settings page listing every address
+  derived so far, with an "Add account" button that bumps the
+  BIP-44 account index.
+- **Capability-JWT scope semantics** for agent signing —
+  AllThruitCoin Phase 5 unlock; the path that lets agent-script
+  features sign on-chain on behalf of operators within scoped
+  caps.
+- **Real-iPhone deploy validation** — software impl is
+  cross-platform, just needs deploy-and-confirm. Gated on
+  Apple-platform build host availability + Xcode DeviceSupport.
+
+---
+
+## Prior sprints (shipped)
+
+### Bitcoin credential kind (3 waves, 2026-04-29)
+
+Sister implementation of the Ethereum credential kind. Reuses the
+BIP-39 mnemonic + BIP-32 + secp256k1 infrastructure; net-new code
+is bech32 encoding (BIP-173), HASH160 + RIPEMD-160, BIP-137
+signed-message hashing, BIP-137 compact-signature parse + recover.
+
+**Architecture**: one BIP-39 mnemonic per phone (shared
+SecureStorage entry between `MauiEthSignService` and
+`MauiBtcSignService`), two BIP-44 trees:
+- ETH: `m/44'/60'/0'/0/N` → Ethereum addresses (last 20 bytes of
+  Keccak of uncompressed pubkey)
+- BTC: `m/84'/0'/0'/0/N` → bech32 P2WPKH addresses
+  (`bc1q...` mainnet, `tb1q...` testnet)
+
+One backup ceremony covers both coins. Operator writes down 24
+words once, can recover both address trees on any other BIP-39 /
+BIP-44 wallet (MetaMask for ETH, Bitcoin Core / Electrum / Sparrow
+for BTC, hardware wallets for both).
+
+**Wave 1**: `recto.bitcoin` Python module (RIPEMD-160 from-scratch
+reference impl, HASH160, double-SHA-256, bech32/bech32m, BIP-137
+hash, P2WPKH/P2PKH/P2SH-P2WPKH address derivation, BIP-137
+compact-sig parse + recover), `recto[bitcoin]` extra (empty),
+protocol DTOs in `Recto.Shared.Protocol.V04` (BtcSign kind,
+BtcMessageKind discriminator, six btc_* context fields,
+BtcSignatureBase64 on RespondRequest), `docs/v0.4-protocol.md`
+"Bitcoin signing capability (v0.5+)" section. 42 new tests in
+`tests/test_bitcoin.py` against canonical BIP-173 + RIPEMD-160 +
+BIP-137 reference vectors.
+
+**Wave 2**: `PendingRequest.new_btc(...)` constructor with
+construction-time validation, `_pending_to_wire` emits btc_*
+fields, `_handle_respond` structure-checks
+`btc_signature_base64` (65-byte decode + BIP-137 header byte
+27..42), `_notify_resolved` forwards through. Mock bootloader
+"Queue BTC message_sign" operator-UI button + best-effort
+recovered-address display. New `tests/test_bootloader_btc.py`.
+
+**Wave 3**: `IBtcSignService` interface + `BtcAccount` value
+object + `BtcSigningOps` static class (BouncyCastle math) in
+`Recto.Shared/Services/`. `MauiBtcSignService` SecureStorage-
+backed orchestrator in `Recto/Services/` reading the SAME
+mnemonic entry as MauiEthSignService. DI registration alongside
+ETH service. Home.razor render arm with orange BTC badge +
+ApproveBtcSignAsync dispatcher. ~16 new tests in
+`Recto.Shared.Tests/BtcSigningOpsTests.cs` + `Bip32BtcTests.cs`
+including BIP-84 reference vector (abandon...about →
+bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu) and the
+one-mnemonic-two-coins integration test.
+
+**FUSE-mount lag bit hard during this sprint** — bash sandbox
+served truncated views of edited files (server.py at 520 lines
+mid-line, pyproject.toml at 103 lines mid-section) even after
+fresh tmp copies. The Read tool consistently saw the correct
+Windows-side state. Validation deferred to Erik's Windows pytest
+run; cannot be run from sandbox until FUSE refresh.
+
+---
 
 **Why Bitcoin matters even though Ethereum already shipped**: the
 substrate's "phone-resident HD wallet" pitch needs both halves to
@@ -452,10 +543,6 @@ infrastructure is reusable. Most net-new code is the bech32 encoder
 and the PSBT parser/signer. PSBT can ship as `message_signing` first
 (Bitcoin signed-message verb, smaller scope than transactions) with
 PSBT as a follow-up if it stretches the session.
-
----
-
-## Prior sprints (shipped)
 
 ### Ethereum credential kind (4 waves, 2026-04-28; cross-wallet interop confirmed)
 

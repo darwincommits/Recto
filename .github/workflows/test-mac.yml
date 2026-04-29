@@ -44,11 +44,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Recto + pytest
+      - name: Install Recto with all extras the test suite needs
+        # `dev` brings pytest + coverage tooling.
+        # `v0_4` brings cryptography + pyjwt[crypto] which the
+        #         bootloader-sessions / enclave_stub / sign_helper
+        #         tests need (Ed25519 + JWT EdDSA verify path).
+        # `ethereum` and `bitcoin` are empty marker extras (no new
+        #         packages) so we don't install them — the modules
+        #         load by import unconditionally.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install pytest
+          python -m pip install -e ".[dev,v0_4]"
 
       - name: Show environment
         run: |

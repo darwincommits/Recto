@@ -12,16 +12,22 @@ Before responding to the first message of a new conversation, an AI
 assistant should silently load these in order. Don't narrate the
 read-pass back to the user.
 
-1. **`%USERPROFILE%\private\local.md`** (Windows) /
-   **`$HOME/private/local.md`** (macOS / Linux) if it exists —
-   operator-specific overrides (machine identification, git author
-   identity, infrastructure notes, etc.). The file lives at user-home
-   level, OUTSIDE any repo, so it's shared across all sibling repos
-   on the same machine without per-repo duplication. In a fresh
-   Cowork-style session, AI may need to call
-   `request_cowork_directory` to be granted access to that path before
-   reading. Don't be alarmed if the file is absent — it's
-   per-operator and won't exist on a fresh clone.
+1. **`local.md` — operator-specific overrides** (machine identification,
+   git author identity, infrastructure notes, etc.). Look in these
+   locations in order; first hit wins:
+     - `%USERPROFILE%\private\local.md` (Windows, when localmd is
+       cloned to `~/private`)
+     - `$HOME/private/local.md` (macOS / Linux, same convention)
+     - `$HOME/Documents/GitHub/localmd/local.md` (macOS / Windows
+       when GitHub Desktop's default clone path is used — repo at
+       `https://github.com/erikcheatham/localmd`)
+     - `$HOME/localmd/local.md` (CLI default `git clone` location)
+
+   The file is the operator's private memo. In a fresh Cowork-style
+   session, AI may need to call `request_cowork_directory` to be
+   granted access to whichever directory holds it before reading.
+   Don't be alarmed if the file is absent — it's per-operator and
+   won't exist on a fresh public clone.
 2. **This file** — you're here.
 3. **`README.md`** — public pitch, status, license.
 4. **`ARCHITECTURE.md`** — design doc covering YAML schema, pluggable
@@ -474,18 +480,28 @@ Razor render-arm + 11 new tests, same day) shipped consecutively.
 
 **MAC-side pivot (in flight 2026-04-29, paused mid-wave-8).**
 Before Wave 8 (TRON + XRP + SOL + XLM), expanding the Recto test
-+ deploy surface to the Mac mini host (per operator's `local.md`):
++ deploy surface to cover macOS:
 
-  1. **macOS pytest CI** via a self-hosted GitHub Actions runner
-     on `erikcheatham/Recto` with label `recto`. Unlocks ~17
-     platform-gated tests that skip on Windows: `test_sign_helper`
-     Unix-socket flow (11 tests), `test_joblimit` Linux/macOS
-     Win32-Job-Object guards (3), `test_secrets_credman` /
-     `test_secrets_dpapi_machine` "Windows only" reverse-gates
-     (3), `test_adminui` SO_REUSEADDR semantics (1).
-  2. **iOS device deploy** to a real iPhone via Xcode + Apple
-     Developer Program cert + provisioning profile. Activates
-     the `Platforms/iOS/IosSecureEnclaveKeyService.cs` and
+  1. **macOS pytest CI** via GitHub-hosted `macos-latest` runners
+     in `.github/workflows/test-mac.yml`. Recto is a public OSS
+     repo and self-hosted runners on public repos are an attack
+     vector (any fork can submit a PR with a malicious workflow
+     that executes on the runner — documented cryptominer-via-PR
+     pattern). GitHub-hosted runners sidestep this: ephemeral
+     VM per job, free for public repos, no machine-side setup.
+     Unlocks ~17 platform-gated tests that skip on Windows
+     (`test_sign_helper` Unix-socket flow, `test_joblimit`
+     Linux/macOS Win32-Job-Object guards,
+     `test_secrets_credman` / `test_secrets_dpapi_machine`
+     "Windows only" reverse-gates, `test_adminui` SO_REUSEADDR
+     semantics).
+  2. **iOS device deploy** stays MAC-local because it needs
+     a physical iPhone connected via USB — GitHub-hosted
+     runners can't do that. Apple Developer Program ceremony
+     + Xcode + provisioning profile on Erik's MAC, manual
+     `dotnet publish -f net10.0-ios -c Release -r ios-arm64`
+     + `xcrun devicectl device install`. Activates
+     `Platforms/iOS/IosSecureEnclaveKeyService.cs` and
      `IosApnsPushTokenService.cs` paths that have been written
      since v0.5+ but never run on real hardware.
 
@@ -494,13 +510,23 @@ Before Wave 8 (TRON + XRP + SOL + XLM), expanding the Recto test
 iOS 15.8.x) deploys without a minimum-OS workaround. Bundle ID
 is `app.recto.phone`; APNs entitlement is wired in
 `Platforms/iOS/Entitlements.plist`. Setup runbook in
-`docs/MAC-SETUP.md`. Workflow YAML in
-`.github/workflows/test-mac.yml`. Both committed in the same
-sprint that pauses Wave 8.
+`docs/MAC-SETUP.md` (Part A: zero MAC setup needed, just trigger
+the workflow; Part B: iOS deploy ceremony).
 
 Wave 8 resumes after MAC validates the iOS Recto build deploys
 to Erik's iPhone 7 cleanly. Wave 8 scope unchanged (TRON + XRP
 + SOL + XLM = 4 more coins → 20 of 21 covered).
+
+**Lesson banked from the self-hosted runner false-start
+(2026-04-29):** never put a self-hosted GitHub Actions runner on
+a public repo without explicit fork-PR mitigations
+(`pull_request_target` removed, fork PRs gated behind
+manual approval, ideally the runner is ephemeral / containerized).
+Default to GitHub-hosted runners for public-repo CI; reach for
+self-hosted only when a private repo (AllThruit / Verso are both
+private — different threat model) or when the test genuinely
+requires unique hardware unavailable to GitHub-hosted (e.g.,
+iOS device deploy with a connected iPhone).
 
 **Wave 8 / 9 — TRON, XRP, SOL, XLM.** Each is its own curve +
 signature scheme:

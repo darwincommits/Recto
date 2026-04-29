@@ -1,125 +1,50 @@
 # MAC-side setup for Recto
 
-Recto's Mac mini host plays two roles for this repo:
+Recto's Mac mini host plays one substantive role for this repo:
 
-1. **macOS pytest CI** — runs the suite via a GitHub Actions
-   self-hosted runner. Unlocks ~17 platform-gated tests that
-   currently skip on Windows (`test_sign_helper` Unix-socket flow,
-   `test_joblimit` Linux/macOS Win32-Job-Object-not-supported
-   guards, `test_secrets_credman`/`test_secrets_dpapi_machine`
-   "Windows only" reverse-gates, `test_adminui` SO_REUSEADDR
-   semantics).
+**iOS deploy host** — builds and deploys the MAUI Blazor app to
+real iPhone hardware via Xcode + the Apple Developer Program
+certificate / provisioning profile. The phone's Secure Enclave
+path (`Platforms/iOS/IosSecureEnclaveKeyService.cs`) and APNs
+integration (`IosApnsPushTokenService.cs`) have been written
+but never validated on real hardware — this host enables that.
 
-2. **iOS deploy host** — builds and deploys the MAUI Blazor app to
-   real iPhone hardware via Xcode + the Apple Developer Program
-   certificate / provisioning profile. The phone's Secure Enclave
-   path (`Platforms/iOS/IosSecureEnclaveKeyService.cs`) and APNs
-   integration (`IosApnsPushTokenService.cs`) have been written
-   but never validated on real hardware — this host enables that.
+(Earlier revisions of this runbook included Part A on registering
+a self-hosted GitHub Actions runner for the macOS pytest CI. That
+was reverted on 2026-04-29 because Recto is a public OSS repo
+and self-hosted runners on public repos are an attack vector —
+any fork can submit a PR with a malicious workflow that executes
+on your runner. Recto's macOS CI now uses GitHub-hosted
+`macos-latest` runners, which are free for public repos,
+ephemeral, and require zero machine-side setup. See
+`.github/workflows/test-mac.yml`. iOS deploy stays MAC-local
+because it needs your physical iPhone connected via USB —
+GitHub-hosted runners can't do that.)
 
-This document is the runbook for both. It uses the convention
-`<RECTO_CLONE>` as a placeholder for wherever you cloned the Recto
-repo on this machine. **GitHub Desktop's default landing dir is
-`~/Documents/GitHub/Recto`** — that's the most likely value. CLI
-clones default to `~/Recto`. Substitute whichever applies.
-
-The actions-runner install dir (`~/actions-runner-recto/` below)
-is INDEPENDENT of `<RECTO_CLONE>` — the runner manages its own
-ephemeral checkouts in `_work/Recto/Recto/` regardless of where
-your human-facing clone lives.
-
----
-
-## Part A — GitHub Actions self-hosted runner for Recto
-
-The runner runs `python3 -m pytest tests/` on every push to main
-and on PRs. Mirrors the AllThruit / Verso runners already on MAC.
-
-### Coexistence
-
-If MAC already hosts an `actions.runner.erikcheatham-AllThruit.MAC`
-runner for the AllThruit Reader-App MAUI build, **do not register
-a Recto runner in the same install dir.** Each runner needs its
-own checkout / config / credentials. Use a separate dir:
-
-```
-~/actions-runner-recto/
-```
-
-### Register
-
-1. Go to https://github.com/erikcheatham/Recto/settings/actions/runners
-2. Click "New self-hosted runner" → choose macOS → ARM64
-3. Copy the `--token <29-char>` value from the displayed config block
-4. On MAC, in a fresh terminal:
-
-```bash
-mkdir -p ~/actions-runner-recto
-cd ~/actions-runner-recto
-# Download the runner package (URL from the GitHub UI's instructions)
-curl -o actions-runner-osx-arm64.tar.gz -L \
-  https://github.com/actions/runner/releases/download/v2.334.0/actions-runner-osx-arm64-2.334.0.tar.gz
-tar xzf actions-runner-osx-arm64.tar.gz
-
-# Register. The --labels MUST include 'recto' (matches runs-on in
-# .github/workflows/test-mac.yml). The default 'self-hosted, macOS,
-# ARM64' implicit labels come for free.
-./config.sh \
-  --url https://github.com/erikcheatham/Recto \
-  --token "<paste-token-here>" \
-  --name MAC-recto \
-  --labels recto \
-  --unattended \
-  --replace
-```
-
-5. Install as a launchd service so it survives reboots:
-
-```bash
-./svc.sh install
-./svc.sh start
-./svc.sh status
-```
-
-Confirm the runner shows `Idle` at
-`https://github.com/erikcheatham/Recto/settings/actions/runners`.
-
-### Smoke-test the workflow
-
-Push any trivial change to `main` (or trigger via the
-workflow_dispatch button in the GitHub UI). The Test-on-macOS
-workflow should pick up within ~5 seconds. Look for:
-
-```
-runs-on: [self-hosted, macOS, ARM64, recto]
-```
-
-…and a passing pytest output that's larger than the Windows run
-(more tests, fewer skips).
-
-### Recovery patterns
-
-The runner self-update can corrupt the install non-deterministically
-(documented in `Verso/CLAUDE.md` "Self-hosted runner gotchas" — same
-behavior across all three of Erik's repos). If the runner shows
-`Offline` and the listener crash-loops:
-
-```bash
-cd ~/actions-runner-recto
-./svc.sh stop
-rm -f .runner .runner_migrated .credentials .credentials_rsaparams .path .env
-# Mint a fresh registration token from the GitHub UI, then:
-./config.sh --url https://github.com/erikcheatham/Recto \
-  --token "<new-token>" --name MAC-recto --labels recto \
-  --unattended --replace
-./svc.sh start
-```
-
-Re-register: ALWAYS pass `--labels recto` explicitly. Implicit
-labels are `self-hosted, macOS, ARM64` only — drop the `recto`
-label and the `runs-on` selector in `test-mac.yml` won't match.
+This document uses `<RECTO_CLONE>` as a placeholder for wherever
+you cloned the Recto repo on this machine. **GitHub Desktop's
+default landing dir is `~/Documents/GitHub/Recto`** — that's the
+most likely value. CLI clones default to `~/Recto`. Substitute
+whichever applies.
 
 ---
+
+## Part A — pytest CI (no MAC-side setup needed)
+
+`.github/workflows/test-mac.yml` runs the test suite on every push
+to main and every PR via GitHub-hosted `macos-latest` runners.
+You don't need to register anything on MAC for this to work — it's
+fully managed by GitHub Actions.
+
+To trigger a run manually: GitHub UI → Actions tab → "Test on
+macOS" → "Run workflow" → choose `main` branch → green button.
+
+To see the unlocked test count: look at the run's pytest summary
+output. Should show ~17 fewer skips than the Windows runs, because
+macOS exercises the Unix-socket sign-helper flow + Linux/macOS
+Job-Object stub + the "Windows only" reverse-gates on CredMan +
+DPAPI + SO_REUSEADDR semantics on adminui.
+
 
 ## Part B — iOS deploy to a real iPhone
 

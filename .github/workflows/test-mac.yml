@@ -1,16 +1,19 @@
-# Recto pytest on macOS — self-hosted runner on MAC (10.0.0.162).
+# Recto pytest on macOS — GitHub-hosted runner.
 #
-# Unlocks ~17 platform-skipped tests that the Windows-only / Linux-only
-# gates skip on HECATE: test_adminui Linux SO_REUSEADDR, test_joblimit
-# (Linux/macOS Win32 Job Object stub), test_secrets_credman /
-# test_secrets_dpapi_machine "not supported on non-Windows" guards,
-# and the entire test_sign_helper Unix-socket sign-helper path.
+# Public repo (Apache 2.0), so we use GitHub-hosted macos-latest
+# instead of a self-hosted runner. Self-hosted runners on PUBLIC repos
+# are a documented attack vector: any fork can submit a PR with a
+# malicious workflow that executes on your runner. Hosted macOS
+# runners are ephemeral (clean VM per job), free for public repos,
+# and unlock the same ~17 macOS-specific tests we wanted (Unix-socket
+# sign-helper, Linux/macOS Job-Object stub, "Windows only" reverse-
+# gates on CredMan + DPAPI, SO_REUSEADDR semantics on adminui)
+# because the runner IS actually macOS.
 #
-# Mirrors the dual-runner pattern AllThruit + Verso use on DARWIN
-# (one runner per repo; coexist with the AllThruit Reader-App MAUI
-# build runner that already lives on MAC).
-#
-# Setup steps for the runner — see docs/MAC-SETUP.md.
+# Self-hosted on MAC stays in the picture for iOS device deploy
+# (Apple Developer Program ceremony + xcrun devicectl install to
+# real iPhone hardware) — that's MAC-local manual work, not CI.
+# See docs/MAC-SETUP.md Part B.
 
 name: Test on macOS
 
@@ -26,8 +29,8 @@ permissions:
 
 jobs:
   pytest:
-    name: pytest on macOS (self-hosted)
-    runs-on: [self-hosted, macOS, ARM64, recto]
+    name: pytest on macOS (GitHub-hosted)
+    runs-on: macos-latest
     timeout-minutes: 10
 
     steps:
@@ -36,32 +39,34 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Recto + pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
+
       - name: Show environment
         run: |
           echo "Runner: $(uname -a)"
-          echo "Python: $(python3 --version)"
+          echo "Python: $(python --version)"
           echo "pwd: $(pwd)"
-
-      - name: Install pytest if missing
-        run: |
-          python3 -m pip install --user --upgrade pytest 2>&1 | tail -5 || true
-          python3 -m pytest --version
-
-      - name: Install Recto in editable mode
-        # Picks up pyproject.toml; brings in any deps Recto declares
-        # (today: pure-stdlib, but keeps us forward-compatible).
-        run: |
-          python3 -m pip install --user -e . 2>&1 | tail -10
+          python -m pytest --version
 
       - name: Run full pytest suite
         run: |
-          python3 -m pytest tests/ -v --tb=short
+          python -m pytest tests/ -v --tb=short
 
-      - name: Surface skip count for the README badge
-        # Prints the count of skipped tests so CI logs make it obvious
-        # how many platform-gates we're still running into. On macOS
-        # this should be lower than Windows (the macOS-applicable
-        # gates we just unlocked were ~17 of the ~18 Windows skips).
+      - name: Surface skip count
+        # Prints the count of skipped tests so CI logs make it
+        # obvious how many platform-gates we're still running into.
+        # On macOS this should be lower than Windows (the macOS-
+        # applicable gates we just unlocked were ~17 of the ~18
+        # Windows skips).
         if: always()
         run: |
-          python3 -m pytest tests/ -q 2>&1 | grep -E "passed|skipped|failed" | tail -3
+          python -m pytest tests/ -q 2>&1 | grep -E "passed|skipped|failed" | tail -3

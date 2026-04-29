@@ -452,13 +452,20 @@ already shipped, ~13 of 21 covered. See CHANGELOG entry for the
 detailed primitive list (typed_data_hash, transaction_hash_eip1559,
 RLP, SignAndEncodeTransactionEip1559, mock-bootloader recovery).
 
-**Wave 7 — Bitcoin family (LTC + DOGE + BCH) — NEXT.**
-Same shape as BTC. Different coin types in BIP-44 (`m/44'/2'`
-LTC, `m/44'/3'` DOGE, `m/44'/145'` BCH) and different bech32
-HRPs / address-version bytes. Can probably ship LTC + DOGE + BCH
-in one wave by parameterizing `MauiBtcSignService` over the
-network-config table; net-new code is ~50-100 LOC of constants
-+ HRP-switch in bech32 encode path.
+**Wave 7 — Bitcoin family (LTC + DOGE + BCH) (SHIPPED 2026-04-29).**
+Extends `btc_sign` from "Bitcoin only" to four coins via a single
+`btc_coin` discriminator field. Same crypto primitives across the
+family; per-coin differences (preamble, version bytes, bech32 HRP,
+BIP-44 coin type, default address kind) live in a single
+COIN_CONFIG table mirrored between Python and C#. Adds 3 of 21
+target coins (LTC native SegWit `ltc1q...`, DOGE legacy P2PKH
+`D...`, BCH legacy P2PKH `1...`); BCH retained Bitcoin's signed-
+message preamble post-fork so BTC + BCH share the same preimage
+hash for the same message. Combined with prior waves: **16 of 21
+top coins covered.** Wave 7 part 1 (UI redesign + Python coin
+parameter, 2026-04-29) and part 2 (C# protocol DTOs + state.py
++ bootloader server + mock UI buttons + C# coin parameter +
+Razor render-arm + 11 new tests, same day) shipped consecutively.
 
 **Wave 8 / 9 — TRON, XRP, SOL, XLM.** Each is its own curve +
 signature scheme:

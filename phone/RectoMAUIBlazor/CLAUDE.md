@@ -41,6 +41,42 @@ during the Tier-1 v1-readiness sprint).
 
 ## Phone-app gotchas (MAUI / iOS / Android)
 
+### Razor specifics
+
+- **`error RZ1010: Unexpected "{" after "@" character` — never wrap C#
+  statements in `@{ }` when you're already inside a Razor C# block.**
+  The Razor parser treats `else { ... }`, `@if (...) { ... }`,
+  `@switch (x) { case Y: ... }`, `@foreach (var x in xs) { ... }` as
+  C# context already; inside those bodies you write C# directly. The
+  `@{ }` form is for switching INTO C# context FROM a markup-context
+  region (e.g. inline scratch declarations between two `<div>`
+  blocks). Doubling them up errors with RZ1010 at the inner `@{`.
+
+  Concretely, this is wrong:
+  ```razor
+  case PendingRequestKind.BtcSign:
+      @{ var coin = ResolveCoin(req); }   // RZ1010 — already in C#
+      <span class="@coin">...</span>
+  ```
+  This is right:
+  ```razor
+  case PendingRequestKind.BtcSign:
+      var coin = ResolveCoin(req);        // direct C# — already in C#
+      <span class="@coin">...</span>
+  ```
+  Markup tags inside the case body work because Razor flips back to
+  markup context on `<` and back to C# on the next statement
+  terminator. `@(...)` and `@expr` inside attribute / text positions
+  are fine — those are C#-expression-IN-markup, NOT C#-block-IN-C#.
+
+  Caught wave-7 (twice) — first inside an `else { }` branch when
+  splitting pending requests into IDENTITY & ACCESS / CRYPTO TOKENS
+  sections, then inside a `@switch case` branch when adding the
+  per-request `var btcCoin = ...;` for the LTC/DOGE/BCH render
+  arm. Both fixes were "delete the `@{` and `}` wrappers". Don't
+  reach for `@{ }` reflexively when adding C# helpers next to
+  markup — first ask "am I already in C# context?".
+
 ### C# / .NET specifics
 
 - **`Org.BouncyCastle.Math.BigInteger` is a CLASS, not a struct —

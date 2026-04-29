@@ -166,3 +166,45 @@ public static class BtcNetwork
     /// <summary>Regtest — local-dev chain with hrp <c>bcrt</c>.</summary>
     public const string Regtest = "regtest";
 }
+
+/// <summary>
+/// Bitcoin-family coin discriminator carried on
+/// <see cref="PendingRequestContext.BtcCoin"/>. The crypto primitives
+/// (secp256k1, double-SHA-256, BIP-137, HASH160) are identical across
+/// the family; the per-coin differences are the signed-message
+/// preamble string, the address-format version bytes / bech32 HRP,
+/// and the BIP-44 coin type. All four coins share the
+/// <c>btc_sign</c> credential kind, distinguished by this value.
+///
+/// <para>Defaulting absent / null to <see cref="Bitcoin"/> preserves
+/// backward compatibility with v0.5 launchers that pre-date the
+/// multi-coin extension.</para>
+/// </summary>
+public static class BtcCoin
+{
+    /// <summary>Bitcoin (BTC) — default. <c>m/84'/0'/0'/0/N</c> native
+    /// SegWit P2WPKH (<c>bc1q...</c>). Preamble:
+    /// <c>"Bitcoin Signed Message:\n"</c>.</summary>
+    public const string Bitcoin = "btc";
+
+    /// <summary>Litecoin (LTC) — <c>m/84'/2'/0'/0/N</c> native SegWit
+    /// P2WPKH (<c>ltc1q...</c>) with HRP <c>ltc</c>; legacy P2PKH
+    /// version byte 0x30 (<c>L...</c>). Preamble:
+    /// <c>"Litecoin Signed Message:\n"</c>.</summary>
+    public const string Litecoin = "ltc";
+
+    /// <summary>Dogecoin (DOGE) — <c>m/44'/3'/0'/0/N</c> legacy P2PKH
+    /// only (<c>D...</c> address starting with version byte 0x1E).
+    /// DOGE never adopted native SegWit. Preamble:
+    /// <c>"Dogecoin Signed Message:\n"</c>.</summary>
+    public const string Dogecoin = "doge";
+
+    /// <summary>Bitcoin Cash (BCH) — <c>m/44'/145'/0'/0/N</c> legacy
+    /// P2PKH (<c>1...</c>, same version byte as BTC's legacy). BCH
+    /// retained Bitcoin's signed-message preamble post-fork; only
+    /// the BIP-44 coin type and forward CashAddr surface differ
+    /// (CashAddr deferred — legacy P2PKH still verifies on every
+    /// BCH wallet). Preamble:
+    /// <c>"Bitcoin Signed Message:\n"</c>.</summary>
+    public const string BitcoinCash = "bch";
+}

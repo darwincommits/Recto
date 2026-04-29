@@ -179,12 +179,35 @@ hr {
 .alert-danger  { background: var(--rec-danger-bg);  border-color: var(--rec-danger); }
 .alert-success { background: var(--rec-success-bg); border-color: var(--rec-success); }
 
+/* Badge overrides — color is `!important` because Bootstrap's
+   .text-dark / .text-light utility classes carry !important and would
+   otherwise win the cascade against our dark-mode-aware tinting.
+   Several existing badges in Home.razor use markup like
+   `<span class="badge bg-warning text-dark">TOTP</span>` (the
+   text-dark was Bootstrap's contrast for a light-mode warning
+   yellow); under the vault dark theme we want light/colored text
+   on a dark-tinted background, so the override needs to neutralize
+   text-dark explicitly. The compound selectors `.badge.bg-X.text-dark`
+   below ratchet specificity to (0,3,0) so they beat .text-dark's
+   (0,1,0) +!important, matching our (0,3,0) +!important. */
 .badge { font-family: var(--rec-font-mono); font-weight: 600; letter-spacing: 0.04em; }
-.badge.bg-secondary { background: var(--rec-surface-hi) !important; color: var(--rec-text-muted); }
-.badge.bg-warning   { background: var(--rec-warning-bg) !important; color: var(--rec-warning); border: 1px solid var(--rec-warning); }
-.badge.bg-info      { background: var(--rec-info-bg) !important;    color: var(--rec-info); border: 1px solid var(--rec-info); }
-.badge.bg-success   { background: var(--rec-success-bg) !important; color: var(--rec-success); border: 1px solid var(--rec-success); }
-.badge.bg-primary   { background: var(--rec-accent-bg) !important;  color: var(--rec-accent); border: 1px solid var(--rec-accent); }
+.badge.bg-secondary,
+.badge.bg-secondary.text-dark,
+.badge.bg-secondary.text-light { background: var(--rec-surface-hi) !important; color: var(--rec-text) !important; border: 1px solid var(--rec-border); }
+.badge.bg-warning,
+.badge.bg-warning.text-dark,
+.badge.bg-warning.text-light { background: var(--rec-warning-bg) !important; color: var(--rec-warning) !important; border: 1px solid var(--rec-warning); }
+.badge.bg-info,
+.badge.bg-info.text-dark,
+.badge.bg-info.text-light { background: var(--rec-info-bg) !important; color: var(--rec-info) !important; border: 1px solid var(--rec-info); }
+.badge.bg-success,
+.badge.bg-success.text-dark,
+.badge.bg-success.text-light { background: var(--rec-success-bg) !important; color: var(--rec-success) !important; border: 1px solid var(--rec-success); }
+.badge.bg-primary,
+.badge.bg-primary.text-dark,
+.badge.bg-primary.text-light { background: var(--rec-accent-bg) !important; color: var(--rec-accent) !important; border: 1px solid var(--rec-accent); }
+.badge.bg-dark,
+.badge.bg-dark.text-light { background: var(--rec-surface-lo) !important; color: var(--rec-text) !important; border: 1px solid var(--rec-border-hi); }
 
 .form-control, .form-select {
     background: var(--rec-surface-lo);

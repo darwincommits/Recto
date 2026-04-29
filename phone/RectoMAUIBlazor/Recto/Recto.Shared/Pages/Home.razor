@@ -255,14 +255,23 @@
                                             <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
                                             break;
                                         case PendingRequestKind.BtcSign:
+                                            // Already inside a C# switch-case (the @switch block);
+                                            // var declares directly, no @{ } wrapper needed.
+                                            // Razor RZ1010 if you re-add @{ here.
+                                            var btcCoin = string.IsNullOrEmpty(req.Context.BtcCoin)
+                                                ? BtcCoin.Bitcoin
+                                                : req.Context.BtcCoin!;
                                             <p class="mb-1 fw-semibold">
-                                                <span class="rec-coin-badge rec-coin-badge-btc">BTC</span>@(_btcMessageKindLabel(req.Context.BtcMessageKind))
+                                                <span class="rec-coin-badge @(_btcCoinBadgeClass(btcCoin))">@(_btcCoinTickerLabel(btcCoin))</span>@(_btcMessageKindLabel(req.Context.BtcMessageKind))
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Coin: <code>@(_btcCoinDisplayName(btcCoin))</code>
                                             </p>
                                             <p class="mb-1 text-muted small">
                                                 Network: <code>@(_btcNetworkLabel(req.Context.BtcNetwork))</code>
                                             </p>
                                             <p class="mb-1 text-muted small">
-                                                Path: <code>@(req.Context.BtcDerivationPath ?? "m/84'/0'/0'/0/0")</code>
+                                                Path: <code>@(req.Context.BtcDerivationPath ?? _btcDefaultPathForCoin(btcCoin))</code>
                                             </p>
                                             @if (_btcAddressByRequestId.TryGetValue(req.RequestId, out var btcDerivedAddr))
                                             {
@@ -901,20 +910,31 @@
             return;
         }
 
+        // Wave-7: Bitcoin-family coin discriminator. Defaults to "btc"
+        // for backward compat with v0.5 launchers that pre-date the
+        // multi-coin extension. Each coin's default BIP-44 path is
+        // different (m/84'/0' BTC, m/84'/2' LTC, m/44'/3' DOGE,
+        // m/44'/145' BCH); when btc_derivation_path is absent the
+        // coin's default applies.
+        var coin = string.IsNullOrEmpty(req.Context.BtcCoin)
+            ? BtcCoin.Bitcoin
+            : req.Context.BtcCoin!;
         var derivationPath = string.IsNullOrEmpty(req.Context.BtcDerivationPath)
-            ? "m/84'/0'/0'/0/0"
+            ? _btcDefaultPathForCoin(coin)
             : req.Context.BtcDerivationPath!;
         var network = string.IsNullOrEmpty(req.Context.BtcNetwork)
             ? "mainnet"
             : req.Context.BtcNetwork!;
 
-        _processingText = "Signing with BTC key...";
+        _processingText = $"Signing with {_btcCoinDisplayName(coin)} key...";
         StateHasChanged();
         await Task.Yield();
 
         // Phone produces TWO signatures (same shape as eth_sign):
-        //   (a) BIP-137 compact secp256k1 signature over the BIP-137
-        //       hash of the message, returned in
+        //   (a) BIP-137 compact secp256k1 signature over the
+        //       coin-specific BIP-137 hash of the message (preamble
+        //       differs per coin: BTC + BCH share Bitcoin's preamble,
+        //       LTC + DOGE have their own). Returned in
         //       RespondRequest.BtcSignatureBase64. Opaque to the
         //       bootloader; consumed by the smart contract / off-chain
         //       verifier / wallet performing on-chain verification.
@@ -923,7 +943,7 @@
         //       response came from the paired phone — same envelope
         //       eth_sign / single_sign use.
         var signResult = await BtcSigner.SignMessageAsync(
-            BtcKeyAlias, derivationPath, network, req.Context.BtcMessageText!, CancellationToken.None);
+            BtcKeyAlias, derivationPath, network, coin, req.Context.BtcMessageText!, CancellationToken.None);
         if (signResult.IsFailure)
         {
             _pollingError = signResult.Error.Message;
@@ -1536,13 +1556,16 @@
         foreach (var req in pending)
         {
             if (req.Kind != PendingRequestKind.BtcSign) continue;
+            var coin = string.IsNullOrEmpty(req.Context.BtcCoin)
+                ? BtcCoin.Bitcoin
+                : req.Context.BtcCoin!;
             var path = string.IsNullOrEmpty(req.Context.BtcDerivationPath)
-                ? "m/84'/0'/0'/0/0"
+                ? _btcDefaultPathForCoin(coin)
                 : req.Context.BtcDerivationPath!;
             var network = string.IsNullOrEmpty(req.Context.BtcNetwork)
                 ? "mainnet"
                 : req.Context.BtcNetwork!;
-            var account = await BtcSigner.EnsureMnemonicAsync(BtcKeyAlias, path, network, ct);
+            var account = await BtcSigner.EnsureMnemonicAsync(BtcKeyAlias, path, network, coin, ct);
             if (account.IsSuccess)
             {
                 newMap[req.RequestId] = account.Value.Address;
@@ -1736,6 +1759,53 @@
         BtcNetwork.Regtest => "Bitcoin regtest",
         null => "(unspecified)",
         _ => network!,
+    };
+
+    // ---------------------------------------------------------------
+    // Wave-7 Bitcoin-family coin helpers (BTC + LTC + DOGE + BCH).
+    // Each lookup is a flat switch keyed on the BtcCoin enum string.
+    // ---------------------------------------------------------------
+
+    /// <summary>Three-letter ticker for the badge text.</summary>
+    private static string _btcCoinTickerLabel(string coin) => coin switch
+    {
+        BtcCoin.Bitcoin     => "BTC",
+        BtcCoin.Litecoin    => "LTC",
+        BtcCoin.Dogecoin    => "DOGE",
+        BtcCoin.BitcoinCash => "BCH",
+        _ => "BTC",
+    };
+
+    /// <summary>CSS class on .rec-coin-badge that paints the brand color.</summary>
+    private static string _btcCoinBadgeClass(string coin) => coin switch
+    {
+        BtcCoin.Bitcoin     => "rec-coin-badge-btc",
+        BtcCoin.Litecoin    => "rec-coin-badge-ltc",
+        BtcCoin.Dogecoin    => "rec-coin-badge-doge",
+        BtcCoin.BitcoinCash => "rec-coin-badge-bch",
+        _ => "rec-coin-badge-btc",
+    };
+
+    /// <summary>Friendly full name for the operator approval card.</summary>
+    private static string _btcCoinDisplayName(string coin) => coin switch
+    {
+        BtcCoin.Bitcoin     => "Bitcoin",
+        BtcCoin.Litecoin    => "Litecoin",
+        BtcCoin.Dogecoin    => "Dogecoin",
+        BtcCoin.BitcoinCash => "Bitcoin Cash",
+        _ => coin,
+    };
+
+    /// <summary>Default BIP-44 derivation path per coin. BTC + LTC use
+    /// BIP-84 native SegWit (m/84'); DOGE + BCH use BIP-44 legacy
+    /// P2PKH (m/44') since neither chain widely adopted SegWit.</summary>
+    private static string _btcDefaultPathForCoin(string coin) => coin switch
+    {
+        BtcCoin.Bitcoin     => "m/84'/0'/0'/0/0",
+        BtcCoin.Litecoin    => "m/84'/2'/0'/0/0",
+        BtcCoin.Dogecoin    => "m/44'/3'/0'/0/0",
+        BtcCoin.BitcoinCash => "m/44'/145'/0'/0/0",
+        _ => "m/84'/0'/0'/0/0",
     };
 
     // ---------------------------------------------------------------

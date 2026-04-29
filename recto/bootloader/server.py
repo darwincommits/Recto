@@ -349,6 +349,12 @@ class BootloaderHandler(BaseHTTPRequestHandler):
                 context["btc_message_text"] = p.btc_message_text
             if p.btc_psbt_base64 is not None:
                 context["btc_psbt_base64"] = p.btc_psbt_base64
+            # Wave-7 multi-coin: emit btc_coin so the phone can pick the
+            # right preamble + address format. Default null at the wire
+            # layer so v0.5 phones (which would silently treat absent
+            # field as Bitcoin) don't break.
+            if p.btc_coin is not None and p.btc_coin != "btc":
+                context["btc_coin"] = p.btc_coin
         return {
             "request_id": p.request_id,
             "kind": p.kind,

@@ -267,6 +267,108 @@ class TestSignedMessageHash:
         assert h == double_sha256(expected_preimage)
 
 
+class TestSignedMessageHashCoinFamily:
+    """Wave-7 coin-aware hashing. BTC + BCH share Bitcoin's preamble
+    (24-char "Bitcoin Signed Message:\\n" → length byte 0x18). LTC +
+    DOGE have their own 25-char preambles → length byte 0x19. Each
+    produces a distinct hash for the same message."""
+
+    def test_btc_default_matches_explicit(self):
+        h_default = signed_message_hash(b"hello")
+        h_explicit = signed_message_hash(b"hello", coin="btc")
+        assert h_default == h_explicit
+
+    def test_bch_uses_bitcoin_preamble(self):
+        # BCH retained Bitcoin's signed-message preamble post-fork,
+        # so BCH and BTC produce the SAME hash for the same message.
+        h_btc = signed_message_hash(b"hello", coin="btc")
+        h_bch = signed_message_hash(b"hello", coin="bch")
+        assert h_btc == h_bch
+
+    def test_ltc_distinct_from_btc(self):
+        # LTC preamble: "Litecoin Signed Message:\n" (25 chars).
+        h_btc = signed_message_hash(b"hello", coin="btc")
+        h_ltc = signed_message_hash(b"hello", coin="ltc")
+        assert h_btc != h_ltc
+
+        expected_ltc_preimage = (
+            b"\x19"                                   # length byte = 25
+            + b"Litecoin Signed Message:\n"           # 25 bytes
+            + b"\x05"                                 # varint(5)
+            + b"hello"
+        )
+        assert h_ltc == double_sha256(expected_ltc_preimage)
+
+    def test_doge_distinct_from_btc_and_ltc(self):
+        # DOGE preamble: "Dogecoin Signed Message:\n" (25 chars).
+        h_btc = signed_message_hash(b"hello", coin="btc")
+        h_ltc = signed_message_hash(b"hello", coin="ltc")
+        h_doge = signed_message_hash(b"hello", coin="doge")
+        assert h_doge != h_btc
+        assert h_doge != h_ltc
+
+        expected_doge_preimage = (
+            b"\x19"
+            + b"Dogecoin Signed Message:\n"
+            + b"\x05"
+            + b"hello"
+        )
+        assert h_doge == double_sha256(expected_doge_preimage)
+
+    def test_unknown_coin_rejected(self):
+        import pytest
+        with pytest.raises(ValueError, match="coin must be one of"):
+            signed_message_hash(b"hello", coin="xrp")
+
+
+class TestAddressFromPublicKeyCoinFamily:
+    """Wave-7 coin-aware address derivation. Same compressed pubkey
+    produces different addresses across BTC / LTC / DOGE / BCH because
+    the version bytes / HRPs differ. P2WPKH is rejected for DOGE / BCH
+    (no native SegWit support)."""
+
+    # Generator G (compressed): "\x02" || X-coordinate of secp256k1 G.
+    # Equivalently: bytes(33) where pubkey64 = G.x || G.y uncompressed.
+    # We use the well-known generator point for cross-implementation
+    # reference compatibility — every secp256k1 lib computes the same
+    # HASH160 from this canonical pubkey.
+    _G_UNCOMPRESSED = (
+        bytes.fromhex(
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        )
+    )
+
+    def test_btc_p2wpkh_default(self):
+        addr = address_from_public_key(self._G_UNCOMPRESSED, network="mainnet", coin="btc")
+        # Canonical "HASH160 of G" P2WPKH address from BIP-173 examples.
+        assert addr == "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+
+    def test_ltc_p2wpkh_starts_with_ltc1q(self):
+        addr = address_from_public_key(self._G_UNCOMPRESSED, network="mainnet", coin="ltc")
+        assert addr.startswith("ltc1q"), f"LTC bech32 mainnet addr should start with ltc1q, got {addr}"
+
+    def test_doge_p2pkh_starts_with_D(self):
+        # Default address kind is p2pkh for DOGE (no native SegWit).
+        addr = address_from_public_key(self._G_UNCOMPRESSED, network="mainnet", coin="doge")
+        assert addr.startswith("D"), f"DOGE mainnet P2PKH (version 0x1E) should start with 'D', got {addr}"
+
+    def test_bch_p2pkh_starts_with_1(self):
+        # BCH legacy P2PKH (version 0x00) shares format with BTC's legacy.
+        addr = address_from_public_key(self._G_UNCOMPRESSED, network="mainnet", coin="bch")
+        assert addr.startswith("1"), f"BCH mainnet legacy P2PKH should start with '1', got {addr}"
+
+    def test_doge_rejects_p2wpkh(self):
+        import pytest
+        with pytest.raises(ValueError, match="does not support native SegWit"):
+            address_from_public_key(self._G_UNCOMPRESSED, network="mainnet", kind="p2wpkh", coin="doge")
+
+    def test_bch_rejects_p2wpkh(self):
+        import pytest
+        with pytest.raises(ValueError, match="does not support native SegWit"):
+            address_from_public_key(self._G_UNCOMPRESSED, network="mainnet", kind="p2wpkh", coin="bch")
+
+
 # ---------------------------------------------------------------------------
 # BIP-137 compact signature parse.
 # ---------------------------------------------------------------------------

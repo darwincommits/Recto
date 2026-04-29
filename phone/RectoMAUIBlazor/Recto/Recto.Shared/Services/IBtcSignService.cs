@@ -51,6 +51,7 @@ public interface IBtcSignService
         string alias,
         string derivationPath,
         string network,
+        string coin,
         CancellationToken ct);
 
     /// <summary>
@@ -62,6 +63,7 @@ public interface IBtcSignService
         string alias,
         string derivationPath,
         string network,
+        string coin,
         CancellationToken ct);
 
     /// <summary>
@@ -93,6 +95,7 @@ public interface IBtcSignService
         string alias,
         string derivationPath,
         string network,
+        string coin,
         string message,
         CancellationToken ct);
 

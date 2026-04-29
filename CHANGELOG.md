@@ -7,6 +7,111 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Wave 7: Bitcoin family (LTC + DOGE + BCH) end-to-end (2026-04-29)
+
+Extends the `btc_sign` credential kind from "Bitcoin only" to the
+full Bitcoin family of four coins via a single coin-discriminator
+field. Same crypto primitives across the family (secp256k1,
+double-SHA-256, BIP-137 compact signatures, HASH160); per-coin
+differences (preamble, address-format version bytes, bech32 HRP,
+BIP-44 coin type, default address kind) live in a single COIN_CONFIG
+table that mirrors between Python's `recto.bitcoin` and C#'s
+`BtcSigningOps`. Adding a fifth coin = one entry in each table
+plus a test vector. No new credential kinds, no new RFC fields
+beyond the optional `btc_coin` discriminator, no breaking changes
+to v0.5 phones (absent / null `btc_coin` defaults to "btc").
+
+**Coverage unlocked.** Three more of the user's top-21 target
+coins activated:
+- **LTC (Litecoin)** — `m/84'/2'/0'/0/N` native SegWit P2WPKH
+  (`ltc1q...`) with HRP `ltc`. Litecoin Signed Message preamble.
+- **DOGE (Dogecoin)** — `m/44'/3'/0'/0/N` legacy P2PKH (`D...`,
+  version byte 0x1E). Dogecoin Signed Message preamble. No
+  native SegWit.
+- **BCH (Bitcoin Cash)** — `m/44'/145'/0'/0/N` legacy P2PKH
+  (`1...`, version byte 0x00 — same as BTC's legacy form). BCH
+  retained Bitcoin's signed-message preamble post-fork; only
+  the BIP-44 coin type and forward CashAddr surface differ
+  (CashAddr deferred — legacy P2PKH still verifies on every BCH
+  wallet). Same preimage hash as BTC for the same message.
+
+Combined with BTC + ETH-family from prior waves: 16 of 21 top
+coins now sign through Recto.
+
+**Wave 7A — Python verifier (recto.bitcoin) coin parameter.**
+Already shipped in Wave 7 part 1 — `signed_message_hash`,
+`address_from_public_key`, `recover_address`, `verify_signature`
+all take an optional `coin="btc"` parameter, with the per-coin
+preamble + version bytes + HRP looked up from a `COIN_CONFIG`
+dict at module top. Backward compatible — existing BTC callers
+(default coin) keep working unchanged.
+
+**Wave 7B — Protocol DTOs.** New `BtcCoin` enum class in
+`Recto.Shared.Protocol.V04` (constants: `Bitcoin` / `Litecoin` /
+`Dogecoin` / `BitcoinCash`), new optional `btc_coin` field on
+`PendingRequestContext`. Same `btc_sign` credential kind covers
+all four; the discriminator selects which.
+
+**Wave 7C — Python state.py + bootloader server.**
+`PendingRequest.btc_coin` field added with default None.
+`PendingRequest.new_btc()` accepts a `btc_coin: str = "btc"`
+parameter with construction-time validation; if
+`btc_derivation_path` is None, it defaults to the coin's
+canonical BIP-44 path (`m/84'/0'` BTC, `m/84'/2'` LTC,
+`m/44'/3'` DOGE, `m/44'/145'` BCH). `_pending_to_wire` emits
+the `btc_coin` field only when non-default (preserves v0.5
+wire shape for BTC-only callers). `_handle_respond` is
+coin-agnostic — BIP-137 compact-sig structural validation is
+the same across the family.
+
+**Wave 7D — C# BtcSigningOps coin-aware primitives.** New
+`BtcCoinConfig` record + `CoinConfigs` dict mirroring Python's
+`COIN_CONFIG`. `SignedMessageHash(message, coin="btc")` dispatches
+to the right preamble. `AddressFromPublicKey(pub, network, kind,
+coin)` dispatches to the right version bytes / HRP. New
+`Base58CheckEncode` for legacy P2PKH (DOGE / BCH default kind).
+P2WPKH rejected with a clear error when called against DOGE / BCH
+(no native SegWit support).
+
+**Wave 7E — C# `IBtcSignService` + `MauiBtcSignService` coin
+parameter.** All three method signatures (`EnsureMnemonicAsync`,
+`GetAccountAsync`, `SignMessageAsync`) now accept a `string coin`
+parameter. The service's internal `DeriveAccount` helper uses the
+coin's `DefaultAddressKind` (P2WPKH for BTC/LTC, P2PKH for
+DOGE/BCH) so the address surfaced to the operator UI matches
+what each coin's wallet ecosystem expects.
+
+**Wave 7F — Home.razor BtcSign render arm.** Per-coin badge
+(BTC orange `#f7931a`, LTC blue `#345d9d`, DOGE gold `#c2a633`,
+BCH green `#0ac18e`) painted via the `.rec-coin-badge-{coin}`
+CSS classes shipped in part 1's vault redesign. Approval card
+shows coin name + network + path + derived address; the
+existing single-foreach RenderFragment lambda dispatches the
+right helper per request automatically.
+
+**Wave 7G — Mock bootloader operator UI.** Refactored the
+existing BTC handler into `_queue_btc_family_message_sign(coin)`
+helper driven by a `_BTC_FAMILY_CONFIG` dict mapping coin →
+ticker / default path / placeholder address / secret label.
+Three new endpoint paths:
+`/_queue_ltc_message_sign` / `/_queue_doge_message_sign` /
+`/_queue_bch_message_sign` plus their UI buttons. Recovery side
+uses the new `coin=` parameter on `recto.bitcoin.recover_address`
++ `signed_message_hash` so each end-to-end test is self-verifying
+(operator sees "recovered: ltc1q.../D.../1..." inline). Recent-
+responses listing now shows the right ticker (LTC/DOGE/BCH)
+instead of always "BTC".
+
+**Tests.** Two new test classes in `tests/test_bitcoin.py`:
+`TestSignedMessageHashCoinFamily` (5 tests — pins that BTC + BCH
+share the Bitcoin preamble, LTC + DOGE produce distinct hashes
+matching their canonical preambles, unknown coin rejected) and
+`TestAddressFromPublicKeyCoinFamily` (6 tests — BTC P2WPKH
+canonical reference vector, LTC bech32 starts with `ltc1q`, DOGE
+P2PKH starts with `D`, BCH legacy P2PKH starts with `1`, P2WPKH
+rejected for DOGE / BCH with a clear error). 11 net-new tests
+covering the coin-config dispatch surface end to end.
+
 ### Added — Wave 6: EVM expansion + EIP-712 + EIP-1559 (2026-04-29)
 
 Extends the Ethereum credential kind from "personal_sign on a

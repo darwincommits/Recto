@@ -1317,15 +1317,29 @@ class Handler(BaseHTTPRequestHandler):
             send_push_wakeup(target_phone, request_id, "pgp_sign")
             self._send_redirect("/")
             return
-        if url.path == "/_queue_btc_message_sign":
-            # v0.5+ BTC message_signing request. Mints a fixed login-style
-            # message, queues a btc_sign PendingRequest with the six BTC
-            # context fields, and returns. The phone derives the
-            # secp256k1 key from the SAME BIP-39 mnemonic the ETH
-            # service uses at the default m/84'/0'/0'/0/0 path
-            # (native-SegWit P2WPKH), computes the BIP-137 hash, signs
-            # both the BIP-137 digest AND the standard payload_hash_b64u
-            # (Ed25519 envelope), and POSTs back via /v0.4/respond/<id>.
+        # ---- Bitcoin family message_signing endpoints ----
+        # Same shape across BTC / LTC / DOGE / BCH. The crypto primitives
+        # are identical (secp256k1, double-SHA-256, BIP-137 compact sig);
+        # differences are the preamble string, BIP-44 path, and address
+        # format — all encoded in the helper below.
+        _BTC_FAMILY_CONFIG = {
+            "btc":  {"ticker": "BTC",  "path": "m/84'/0'/0'/0/0",   "addr": "bc1qplaceholder0000000000000000000000000",  "secret": "btc-wallet-login"},
+            "ltc":  {"ticker": "LTC",  "path": "m/84'/2'/0'/0/0",   "addr": "ltc1qplaceholder000000000000000000000000", "secret": "ltc-wallet-login"},
+            "doge": {"ticker": "DOGE", "path": "m/44'/3'/0'/0/0",   "addr": "DPlaceholder1111111111111111111111",       "secret": "doge-wallet-login"},
+            "bch":  {"ticker": "BCH",  "path": "m/44'/145'/0'/0/0", "addr": "1Placeholder1111111111111111111111",       "secret": "bch-wallet-login"},
+        }
+
+        def _queue_btc_family_message_sign(coin: str) -> None:
+            """Mint a login-style message and queue a btc_sign request
+            for the given coin. Phone derives secp256k1 key from the
+            shared mnemonic at the coin's default BIP-44 path, computes
+            the coin-specific BIP-137 hash (preamble varies; BTC + BCH
+            share Bitcoin's), signs, returns 65-byte compact sig +
+            Ed25519 envelope. Mock-side respond handler recovers the
+            signer address using recto.bitcoin.recover_address with
+            the same coin parameter.
+            """
+            cfg = _BTC_FAMILY_CONFIG[coin]
             with STATE._lock:
                 target_phone = STATE.registered[-1] if STATE.registered else None
             if target_phone is None:
@@ -1333,42 +1347,48 @@ class Handler(BaseHTTPRequestHandler):
                 return
             request_id = str(uuid.uuid4())
             payload_hash = secrets.token_bytes(32)
-            # Placeholder address — phone overwrites with the real bech32
-            # P2WPKH address it derives. Mock recovers the actual signer
-            # from the BIP-137 sig and surfaces it inline (see the
-            # btc_sign branch in the respond handler). Real production
-            # launchers would pin the expected address from a
-            # service.yaml entry; this is dev-tooling and stays loose.
-            placeholder_address = "bc1qplaceholder0000000000000000000000000"
-            network = "mainnet"
-            message_text = (
-                f"Login to demo.recto.example "
-                f"at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} (BTC)"
-            )
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            message_text = f"Login to demo.recto.example at {ts} ({cfg['ticker']})"
+            ctx = {
+                "child_pid": secrets.randbelow(60000) + 1000,
+                "child_argv0": "browser",
+                "requested_at_unix": int(time.time()),
+                "operation_description": f"{cfg['ticker']} message_signing: {message_text!r}",
+                "payload_hash_b64u": b64u_encode(payload_hash),
+                "btc_network": "mainnet",
+                "btc_message_kind": "message_signing",
+                "btc_address": cfg["addr"],
+                "btc_derivation_path": cfg["path"],
+                "btc_message_text": message_text,
+            }
+            # Only emit btc_coin field when non-default — backward compat
+            # with v0.5 phones that pre-date the multi-coin extension.
+            if coin != "btc":
+                ctx["btc_coin"] = coin
             with STATE._lock:
                 STATE.pending_requests[request_id] = {
                     "request_id": request_id,
                     "kind": "btc_sign",
                     "service": "demo.recto.example",
-                    "secret": "btc-wallet-login",
-                    "context": {
-                        "child_pid": secrets.randbelow(60000) + 1000,
-                        "child_argv0": "browser",
-                        "requested_at_unix": int(time.time()),
-                        "operation_description": f"BTC message_signing: {message_text!r}",
-                        "payload_hash_b64u": b64u_encode(payload_hash),
-                        # The six BTC context fields per the protocol RFC.
-                        "btc_network": network,
-                        "btc_message_kind": "message_signing",
-                        "btc_address": placeholder_address,
-                        "btc_derivation_path": "m/84'/0'/0'/0/0",
-                        "btc_message_text": message_text,
-                    },
+                    "secret": cfg["secret"],
+                    "context": ctx,
                     "_phone_id": target_phone["phone_id"],
                     "_queued_at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
                 }
             send_push_wakeup(target_phone, request_id, "btc_sign")
             self._send_redirect("/")
+
+        if url.path == "/_queue_btc_message_sign":
+            _queue_btc_family_message_sign("btc")
+            return
+        if url.path == "/_queue_ltc_message_sign":
+            _queue_btc_family_message_sign("ltc")
+            return
+        if url.path == "/_queue_doge_message_sign":
+            _queue_btc_family_message_sign("doge")
+            return
+        if url.path == "/_queue_bch_message_sign":
+            _queue_btc_family_message_sign("bch")
             return
 
         if url.path == "/_queue_eth_personal_sign":
@@ -2200,18 +2220,29 @@ class Handler(BaseHTTPRequestHandler):
 
                         msg_kind_btc = pending["context"].get("btc_message_kind")
                         network_btc = pending["context"].get("btc_network", "mainnet")
+                        # Wave-7: coin-aware recovery. Defaults to "btc"
+                        # for backward compat. Mirrors C# BtcCoin enum.
+                        coin_btc = pending["context"].get("btc_coin", "btc") or "btc"
+                        extra_response_fields["btc_coin"] = coin_btc
                         if msg_kind_btc == "message_signing":
                             msg_text_btc = pending["context"].get("btc_message_text", "")
-                            digest_btc = _btc_msg_hash(msg_text_btc.encode("utf-8"))
-                            recovered_btc = _btc_recover_addr(digest_btc, btc_signature_base64, network=network_btc)
+                            digest_btc = _btc_msg_hash(msg_text_btc.encode("utf-8"), coin=coin_btc)
+                            recovered_btc = _btc_recover_addr(digest_btc, btc_signature_base64, network=network_btc, coin=coin_btc)
                             extra_response_fields["btc_recovered_address"] = recovered_btc
                             expected_addr_btc = (pending["context"].get("btc_address") or "").lower()
                             # Suppress the match comparison when the queued
                             # address is a placeholder (operator-UI default
                             # for phones that haven't pre-registered an
-                            # address). Same heuristic as the ETH path.
-                            placeholder_btc = {"", "bc1qplaceholder", "bc1qplaceholder0000000000000000000000000"}
-                            if expected_addr_btc in placeholder_btc or expected_addr_btc.startswith("bc1qplaceholder"):
+                            # address). Each coin has its own placeholder
+                            # prefix; lowercase-comparing against the
+                            # known prefixes catches them all.
+                            placeholder_prefixes = (
+                                "bc1qplaceholder",   # BTC
+                                "ltc1qplaceholder",  # LTC
+                                "dplaceholder",      # DOGE (lowercase 'd')
+                                "1placeholder",      # BCH legacy
+                            )
+                            if not expected_addr_btc or expected_addr_btc.startswith(placeholder_prefixes):
                                 pass  # leave btc_address_match unset; UI shows recovered without marker
                             else:
                                 extra_response_fields["btc_address_match"] = (
@@ -2551,8 +2582,11 @@ def render_index() -> str:
                 f"<code style='word-break: break-all;'>{btc_sig}</code>"
                 if btc_sig else ""
             )
+            # Wave-7: ticker reflects the actual coin, not always "BTC".
+            coin_btc_resp = r.get("btc_coin", "btc") or "btc"
+            ticker_btc = {"btc": "BTC", "ltc": "LTC", "doge": "DOGE", "bch": "BCH"}.get(coin_btc_resp, "BTC")
             return (
-                f"<strong>approved</strong> &mdash; BTC {msg_kind_btc} "
+                f"<strong>approved</strong> &mdash; {ticker_btc} {msg_kind_btc} "
                 f"<code>{network_btc}</code>, sig <code>{btc_sig_short}</code>"
                 f"{recovery_html_btc} &mdash; {verify_marker}"
                 f"{msg_text_html_btc}"
@@ -2658,6 +2692,15 @@ def render_index() -> str:
 </form>
 <form method="post" action="/_queue_btc_message_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue BTC message_sign</button>
+</form>
+<form method="post" action="/_queue_ltc_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue LTC message_sign</button>
+</form>
+<form method="post" action="/_queue_doge_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue DOGE message_sign</button>
+</form>
+<form method="post" action="/_queue_bch_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue BCH message_sign</button>
 </form>
 <div class="dim" style="font-size: 0.85rem; margin-top: 0.4rem;">
   Sign request targets the most-recently-registered phone with a random managed secret.

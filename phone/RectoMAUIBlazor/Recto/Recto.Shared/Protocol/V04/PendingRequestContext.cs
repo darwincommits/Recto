@@ -129,7 +129,13 @@ public sealed record PendingRequestContext(
     [property: JsonPropertyName("btc_address")] string? BtcAddress = null,
     [property: JsonPropertyName("btc_derivation_path")] string? BtcDerivationPath = null,
     [property: JsonPropertyName("btc_message_text")] string? BtcMessageText = null,
-    [property: JsonPropertyName("btc_psbt_base64")] string? BtcPsbtBase64 = null);
+    [property: JsonPropertyName("btc_psbt_base64")] string? BtcPsbtBase64 = null,
+    // Wave-7: Bitcoin-family coin discriminator. Same `btc_sign`
+    // credential kind covers BTC + LTC + DOGE + BCH; this field
+    // selects which. Absent / null defaults to "btc" for backward
+    // compat with v0.5 launchers that pre-date the multi-coin
+    // extension. See BtcCoin enum class for valid values.
+    [property: JsonPropertyName("btc_coin")] string? BtcCoin = null);
 
 public static class PgpOperation
 {

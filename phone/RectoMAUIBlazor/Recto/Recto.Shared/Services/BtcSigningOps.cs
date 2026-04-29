@@ -74,23 +74,71 @@ public static class BtcSigningOps
         return SHA256.HashData(SHA256.HashData(data));
     }
 
-    /// <summary>
-    /// BIP-137 signed-message hash:
-    /// <c>double_sha256(0x18 || "Bitcoin Signed Message:\n" || varint(len(msg)) || msg)</c>.
-    /// The <c>0x18</c> magic prefix byte (24 = length of the literal
-    /// string <c>"Bitcoin Signed Message:\n"</c>) is the BIP-137 magic
-    /// that distinguishes a message-signing preimage from any other
-    /// secp256k1 hash. Without it, signatures recover to a different
-    /// public key than what Bitcoin Core's <c>verifymessage</c>
-    /// computes, breaking cross-wallet verification.
-    /// </summary>
-    public static byte[] SignedMessageHash(string message)
+    // ---------------------------------------------------------------
+    // Bitcoin-family coin config (BTC + LTC + DOGE + BCH).
+    //
+    // Same crypto primitives across the family — secp256k1, double-
+    // SHA-256, BIP-137, HASH160. Differences live entirely in this
+    // table: signed-message preamble, address-format version bytes,
+    // bech32 HRP (where supported), BIP-44 coin type, default
+    // address kind. Adding a fifth coin = one entry here plus a
+    // test vector.
+    //
+    // Mirrors recto.bitcoin.COIN_CONFIG on the Python verifier side.
+    // The two MUST stay in sync — if the preamble changes here, the
+    // verifier won't recover the correct address from a signature.
+    // ---------------------------------------------------------------
+
+    /// <summary>Per-coin parameters; values mirror Python's
+    /// <c>recto.bitcoin.COIN_CONFIG</c>.</summary>
+    public sealed record BtcCoinConfig(
+        string Name,
+        string Preamble,            // ASCII, no leading length byte
+        byte P2pkhVersionMainnet,
+        byte P2pkhVersionTestnet,
+        byte P2shVersionMainnet,
+        byte P2shVersionTestnet,
+        string? Bech32HrpMainnet,   // null if coin doesn't support native SegWit
+        string? Bech32HrpTestnet,
+        string? Bech32HrpRegtest,
+        int Bip44CoinType,
+        string DefaultAddressKind,  // "p2wpkh" | "p2pkh"
+        string DefaultPath);
+
+    private static readonly System.Collections.Generic.Dictionary<string, BtcCoinConfig> CoinConfigs = new(StringComparer.OrdinalIgnoreCase)
     {
+        ["btc"] = new("Bitcoin",       "Bitcoin Signed Message:\n",  0x00, 0x6F, 0x05, 0xC4, "bc",  "tb",   "bcrt", 0,   "p2wpkh", "m/84'/0'/0'/0/0"),
+        ["ltc"] = new("Litecoin",      "Litecoin Signed Message:\n", 0x30, 0x6F, 0x32, 0x3A, "ltc", "tltc", "rltc", 2,   "p2wpkh", "m/84'/2'/0'/0/0"),
+        ["doge"]= new("Dogecoin",      "Dogecoin Signed Message:\n", 0x1E, 0x71, 0x16, 0xC4, null,  null,   null,   3,   "p2pkh",  "m/44'/3'/0'/0/0"),
+        ["bch"] = new("Bitcoin Cash",  "Bitcoin Signed Message:\n",  0x00, 0x6F, 0x05, 0xC4, null,  null,   null,   145, "p2pkh",  "m/44'/145'/0'/0/0"),
+    };
+
+    /// <summary>Look up a coin's config; case-insensitive.</summary>
+    public static BtcCoinConfig GetCoinConfig(string? coin)
+    {
+        var key = string.IsNullOrEmpty(coin) ? "btc" : coin;
+        if (!CoinConfigs.TryGetValue(key, out var cfg))
+            throw new ArgumentException($"Unknown coin '{coin}' (expected one of: btc, ltc, doge, bch).", nameof(coin));
+        return cfg;
+    }
+
+    /// <summary>
+    /// BIP-137 signed-message hash for the given coin family member.
+    /// <c>double_sha256(&lt;len byte&gt; || &lt;preamble&gt; || varint(len(msg)) || msg)</c>
+    /// where <c>&lt;preamble&gt;</c> is the coin-specific magic string
+    /// (e.g. "Bitcoin Signed Message:\\n" for BTC + BCH,
+    /// "Litecoin Signed Message:\\n" for LTC, "Dogecoin Signed
+    /// Message:\\n" for DOGE). The leading length byte is dynamic
+    /// (24 for BTC's 24-char preamble, 25 for LTC/DOGE).
+    /// </summary>
+    public static byte[] SignedMessageHash(string message, string coin = "btc")
+    {
+        var cfg = GetCoinConfig(coin);
         var msgBytes = Encoding.UTF8.GetBytes(message);
-        var prefixStr = Encoding.ASCII.GetBytes("Bitcoin Signed Message:\n");
+        var prefixStr = Encoding.ASCII.GetBytes(cfg.Preamble);
         var varint = EncodeVarint((ulong)msgBytes.Length);
         var combined = new byte[1 + prefixStr.Length + varint.Length + msgBytes.Length];
-        combined[0] = 0x18;
+        combined[0] = (byte)prefixStr.Length;
         Buffer.BlockCopy(prefixStr, 0, combined, 1, prefixStr.Length);
         Buffer.BlockCopy(varint, 0, combined, 1 + prefixStr.Length, varint.Length);
         Buffer.BlockCopy(msgBytes, 0, combined, 1 + prefixStr.Length + varint.Length, msgBytes.Length);
@@ -258,6 +306,90 @@ public static class BtcSigningOps
         var pub33 = CompressPublicKey(pubkey64);
         var h160 = Hash160(pub33);
         return Bech32Encode(hrp, 0, h160);
+    }
+
+    private const string Base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    /// <summary>
+    /// Base58Check encoding for legacy / nested-SegWit addresses.
+    /// <c>base58(payload || double_sha256(payload)[0:4])</c>. Used for
+    /// P2PKH (DOGE, BCH legacy, BTC legacy <c>1...</c>) and P2SH
+    /// (nested SegWit).
+    /// </summary>
+    public static string Base58CheckEncode(byte[] payload)
+    {
+        var checksum = DoubleSha256(payload).AsSpan(0, 4).ToArray();
+        var data = new byte[payload.Length + 4];
+        Buffer.BlockCopy(payload, 0, data, 0, payload.Length);
+        Buffer.BlockCopy(checksum, 0, data, payload.Length, 4);
+
+        // Count leading zeros for the leading-1s prefix.
+        int leadingZeros = 0;
+        for (int i = 0; i < data.Length && data[i] == 0; i++) leadingZeros++;
+
+        // Big-endian → base-58.
+        var n = new BigInteger(1, data);
+        var fiftyEight = BigInteger.ValueOf(58);
+        var sb = new StringBuilder();
+        while (n.SignValue > 0)
+        {
+            var qr = n.DivideAndRemainder(fiftyEight);
+            n = qr[0];
+            sb.Insert(0, Base58Alphabet[qr[1].IntValue]);
+        }
+        for (int i = 0; i < leadingZeros; i++) sb.Insert(0, '1');
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Derive an address for the given coin family member at the given
+    /// network. <paramref name="kind"/> overrides the coin's default
+    /// (P2WPKH for BTC/LTC, P2PKH for DOGE/BCH); pass null to use the
+    /// default. P2WPKH is rejected for DOGE/BCH (no native SegWit).
+    /// </summary>
+    public static string AddressFromPublicKey(byte[] pubkey64, string network, string? kind = null, string coin = "btc")
+    {
+        var cfg = GetCoinConfig(coin);
+        kind ??= cfg.DefaultAddressKind;
+        var pub33 = CompressPublicKey(pubkey64);
+        var h160 = Hash160(pub33);
+
+        if (kind == "p2wpkh")
+        {
+            var hrp = network switch
+            {
+                "mainnet" => cfg.Bech32HrpMainnet,
+                "testnet" or "signet" => cfg.Bech32HrpTestnet,
+                "regtest" => cfg.Bech32HrpRegtest,
+                _ => throw new ArgumentException($"Unknown network '{network}'.", nameof(network)),
+            };
+            if (hrp is null)
+                throw new ArgumentException($"{cfg.Name} does not support native SegWit (P2WPKH); use kind='p2pkh'.", nameof(kind));
+            return Bech32Encode(hrp, 0, h160);
+        }
+        if (kind == "p2pkh")
+        {
+            byte version = network == "mainnet" ? cfg.P2pkhVersionMainnet : cfg.P2pkhVersionTestnet;
+            var payload = new byte[1 + h160.Length];
+            payload[0] = version;
+            Buffer.BlockCopy(h160, 0, payload, 1, h160.Length);
+            return Base58CheckEncode(payload);
+        }
+        if (kind == "p2sh-p2wpkh")
+        {
+            // Redeem script: OP_0 <20-byte hash160> = 0x00 0x14 <hash160>.
+            var redeem = new byte[2 + h160.Length];
+            redeem[0] = 0x00;
+            redeem[1] = 0x14;
+            Buffer.BlockCopy(h160, 0, redeem, 2, h160.Length);
+            byte version = network == "mainnet" ? cfg.P2shVersionMainnet : cfg.P2shVersionTestnet;
+            var redeemHash = Hash160(redeem);
+            var payload = new byte[1 + redeemHash.Length];
+            payload[0] = version;
+            Buffer.BlockCopy(redeemHash, 0, payload, 1, redeemHash.Length);
+            return Base58CheckEncode(payload);
+        }
+        throw new ArgumentException($"Unknown address kind '{kind}' (expected p2wpkh / p2pkh / p2sh-p2wpkh).", nameof(kind));
     }
 
     // ---------------------------------------------------------------

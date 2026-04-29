@@ -200,6 +200,13 @@ class PendingRequest:
     btc_derivation_path: str | None = None  # default "m/84'/0'/0'/0/0"
     btc_message_text: str | None = None  # for message_signing
     btc_psbt_base64: str | None = None  # for psbt (BIP-174) — reserved
+    # Wave-7: Bitcoin-family coin discriminator. Same `btc_sign`
+    # credential kind covers BTC + LTC + DOGE + BCH; this field
+    # selects which. Absent / None defaults to "btc" for backward
+    # compat with v0.5 launchers that pre-date the multi-coin
+    # extension. Mirrors C# `BtcCoin` constants in
+    # `Recto.Shared.Protocol.V04`.
+    btc_coin: str | None = None  # "btc" | "ltc" | "doge" | "bch"
 
     @classmethod
     def new(
@@ -326,9 +333,10 @@ class PendingRequest:
         btc_network: str,
         btc_message_kind: str,
         btc_address: str,
-        btc_derivation_path: str = "m/84'/0'/0'/0/0",
+        btc_derivation_path: str | None = None,
         btc_message_text: str | None = None,
         btc_psbt_base64: str | None = None,
+        btc_coin: str = "btc",
         ttl_seconds: int = 300,
     ) -> PendingRequest:
         """Construct a ``btc_sign`` PendingRequest with the six
@@ -354,6 +362,21 @@ class PendingRequest:
                 f"btc_network must be one of "
                 f"'mainnet'|'testnet'|'signet'|'regtest', got {btc_network!r}"
             )
+        if btc_coin not in ("btc", "ltc", "doge", "bch"):
+            raise ValueError(
+                f"btc_coin must be one of 'btc'|'ltc'|'doge'|'bch', "
+                f"got {btc_coin!r}"
+            )
+        # Coin-default BIP-44 paths. BTC + LTC default to BIP-84 native
+        # SegWit (m/84'); DOGE + BCH default to BIP-44 legacy P2PKH
+        # (m/44') since neither chain widely adopted SegWit.
+        if btc_derivation_path is None:
+            btc_derivation_path = {
+                "btc":  "m/84'/0'/0'/0/0",
+                "ltc":  "m/84'/2'/0'/0/0",
+                "doge": "m/44'/3'/0'/0/0",
+                "bch":  "m/44'/145'/0'/0/0",
+            }[btc_coin]
         body_fields = {
             "message_signing": btc_message_text,
             "psbt": btc_psbt_base64,
@@ -394,6 +417,7 @@ class PendingRequest:
             btc_derivation_path=btc_derivation_path,
             btc_message_text=btc_message_text,
             btc_psbt_base64=btc_psbt_base64,
+            btc_coin=btc_coin,
         )
 
     @property

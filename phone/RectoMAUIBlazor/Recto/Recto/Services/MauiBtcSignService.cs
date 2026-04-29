@@ -49,6 +49,7 @@ public sealed class MauiBtcSignService : IBtcSignService
         string alias,
         string derivationPath,
         string network,
+        string coin,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(alias))
@@ -76,7 +77,7 @@ public sealed class MauiBtcSignService : IBtcSignService
                     .SetAsync(MnemonicPrefix + alias, mnemonic)
                     .ConfigureAwait(false);
             }
-            return DeriveAccount(mnemonic, derivationPath, network);
+            return DeriveAccount(mnemonic, derivationPath, network, coin);
         }
         catch (Exception ex)
         {
@@ -89,6 +90,7 @@ public sealed class MauiBtcSignService : IBtcSignService
         string alias,
         string derivationPath,
         string network,
+        string coin,
         CancellationToken ct)
     {
         try
@@ -101,7 +103,7 @@ public sealed class MauiBtcSignService : IBtcSignService
                 return Result.Failure<BtcAccount>(Error.NotFound(
                     $"No BIP-39 mnemonic provisioned for '{alias}'."));
             }
-            return DeriveAccount(mnemonic, derivationPath, network);
+            return DeriveAccount(mnemonic, derivationPath, network, coin);
         }
         catch (Exception ex)
         {
@@ -130,6 +132,7 @@ public sealed class MauiBtcSignService : IBtcSignService
         string alias,
         string derivationPath,
         string network,
+        string coin,
         string message,
         CancellationToken ct)
     {
@@ -151,7 +154,7 @@ public sealed class MauiBtcSignService : IBtcSignService
                 .ConfigureAwait(false);
             if (string.IsNullOrEmpty(mnemonic))
             {
-                var ensure = await EnsureMnemonicAsync(alias, derivationPath, network, ct).ConfigureAwait(false);
+                var ensure = await EnsureMnemonicAsync(alias, derivationPath, network, coin, ct).ConfigureAwait(false);
                 if (ensure.IsFailure)
                 {
                     return Result.Failure<string>(ensure.Error);
@@ -169,7 +172,13 @@ public sealed class MauiBtcSignService : IBtcSignService
             seed = Bip39.MnemonicToSeed(mnemonic, passphrase: string.Empty);
             leaf = Bip32.DeriveAtPath(seed, derivationPath);
 
-            var msgHash = BtcSigningOps.SignedMessageHash(message);
+            // Coin-aware: dispatches to the right preamble (BTC/BCH
+            // share Bitcoin's preamble, LTC + DOGE have their own).
+            // The compact-sig header byte is coin-agnostic — same
+            // 27..42 BIP-137 ranges apply across the family because
+            // the verifier on every coin computes recovery the same
+            // way against the coin-specific preimage hash.
+            var msgHash = BtcSigningOps.SignedMessageHash(message, coin);
             var compactSig = BtcSigningOps.SignCompactBip137(msgHash, leaf.PrivateKey);
 
 #if DEBUG
@@ -182,7 +191,7 @@ public sealed class MauiBtcSignService : IBtcSignService
             // next dev iteration.
             System.Diagnostics.Debug.WriteLine(
                 $"[Recto.MauiBtcSignService] BIP-39+BIP-32+BIP-137 path. " +
-                $"alias='{alias}' derivationPath='{derivationPath}' network='{network}' message-bytes={System.Text.Encoding.UTF8.GetByteCount(message)}");
+                $"alias='{alias}' coin='{coin}' derivationPath='{derivationPath}' network='{network}' message-bytes={System.Text.Encoding.UTF8.GetByteCount(message)}");
 #endif
 
             return Result.Success(Convert.ToBase64String(compactSig));
@@ -224,7 +233,7 @@ public sealed class MauiBtcSignService : IBtcSignService
     // Private helpers
     // ---------------------------------------------------------------
 
-    private static Result<BtcAccount> DeriveAccount(string mnemonic, string derivationPath, string network)
+    private static Result<BtcAccount> DeriveAccount(string mnemonic, string derivationPath, string network, string coin)
     {
         byte[]? seed = null;
         Bip32.ExtendedKey? leaf = null;
@@ -233,16 +242,20 @@ public sealed class MauiBtcSignService : IBtcSignService
             seed = Bip39.MnemonicToSeed(mnemonic, passphrase: string.Empty);
             leaf = Bip32.DeriveAtPath(seed, derivationPath);
             var pub = EthSigningOps.PublicKeyFromPrivate(leaf.PrivateKey);
-            // For now we only support P2WPKH (native SegWit). Future
-            // support for P2PKH (m/44'/0') and P2SH-P2WPKH (m/49'/0')
-            // can dispatch on the path's purpose level here.
-            var address = BtcSigningOps.AddressFromPublicKeyP2wpkh(pub, network);
-            return Result.Success(new BtcAccount(derivationPath, address, network, "p2wpkh"));
+            // Coin-aware dispatch. BTC + LTC default to P2WPKH (native
+            // SegWit, BIP-84 path). DOGE + BCH default to P2PKH (legacy,
+            // BIP-44 path) since neither chain widely adopted SegWit.
+            // The coin's BtcCoinConfig.DefaultAddressKind picks which.
+            // Operators wanting a non-default kind would set kind
+            // explicitly via a future API extension.
+            var cfg = BtcSigningOps.GetCoinConfig(coin);
+            var address = BtcSigningOps.AddressFromPublicKey(pub, network, kind: null, coin: coin);
+            return Result.Success(new BtcAccount(derivationPath, address, network, cfg.DefaultAddressKind));
         }
         catch (Exception ex)
         {
             return Result.Failure<BtcAccount>(Error.Failure(
-                $"BIP-32 derivation failed at '{derivationPath}': {ex.GetType().Name}: {ex.Message}"));
+                $"BIP-32 derivation failed at '{derivationPath}' for coin '{coin}': {ex.GetType().Name}: {ex.Message}"));
         }
         finally
         {

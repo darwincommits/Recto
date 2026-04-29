@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      APNs environment. "development" builds against the sandbox push
+      gateway (api.sandbox.push.apple.com); "production" goes to the live
+      gateway (api.push.apple.com). Xcode auto-flips this based on the
+      build configuration; for MAUI we set it explicitly. Bumping to
+      "production" requires the matching production push cert / .p8 key
+      registered with the bootloader.
+    -->
+    <key>aps-environment</key>
+    <string>development</string>
+</dict>
+</plist>

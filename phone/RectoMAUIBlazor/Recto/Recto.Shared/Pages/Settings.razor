@@ -1,0 +1,193 @@
+@page "/settings"
+@using System.Threading.Tasks
+@using Microsoft.AspNetCore.Components
+@using Recto.Shared.Common
+@using Recto.Shared.Models
+@using Recto.Shared.Services
+@inject NavigationManager Nav
+@inject IPairingStateService Pairing
+@inject IEnclaveKeyService EnclaveKeys
+@inject ITotpService Totp
+@inject IPinningService Pinning
+@inject IUserPreferencesService Prefs
+
+<PageTitle>Settings - Recto</PageTitle>
+
+<div class="container py-3" style="max-width: 600px;">
+    <div class="d-flex align-items-center mb-3">
+        <button class="btn btn-link text-decoration-none p-0 me-3"
+                @onclick="@(() => Nav.NavigateTo("/"))"
+                aria-label="Back">
+            &larr; Back
+        </button>
+        <h1 class="h4 mb-0">Settings</h1>
+    </div>
+
+    @if (_savedFlash)
+    {
+        <div class="alert alert-success py-2" role="alert">
+            Settings saved.
+        </div>
+    }
+
+    <div class="card mb-3">
+        <div class="card-header py-2">Polling</div>
+        <div class="card-body">
+            <p class="text-muted small mb-2">
+                How often the phone checks the bootloader for pending
+                requests when no push notification has arrived. Sub-second
+                wakeup happens via push when configured; this poll is the
+                fallback for phones without push or for transient push
+                outages.
+            </p>
+            <label class="form-label">Interval</label>
+            <select class="form-select" @bind="_settings.PollingIntervalSeconds"
+                    @bind:after="OnSettingChanged">
+                <option value="2">2 seconds (most responsive, more battery)</option>
+                <option value="3">3 seconds (default)</option>
+                <option value="5">5 seconds (balanced)</option>
+                <option value="10">10 seconds (battery-friendly)</option>
+                <option value="0">Disabled (push only)</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header py-2">Audit history</div>
+        <div class="card-body">
+            <p class="text-muted small mb-2">
+                Maximum number of past approvals/denials shown in the
+                phone-side history view. Stored on the bootloader; the phone
+                fetches on demand. Larger values mean longer scrollback;
+                bootloader caps at 500 events per phone regardless.
+            </p>
+            <label class="form-label">Display limit</label>
+            <select class="form-select" @bind="_settings.AuditHistoryLimit"
+                    @bind:after="OnSettingChanged">
+                <option value="20">Last 20 events</option>
+                <option value="50">Last 50 events (default)</option>
+                <option value="200">Last 200 events</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header py-2">Theme</div>
+        <div class="card-body">
+            <label class="form-label">Appearance</label>
+            <select class="form-select" @bind="_settings.ThemePreference"
+                    @bind:after="OnSettingChanged">
+                <option value="system">Match system (default)</option>
+                <option value="light">Always light</option>
+                <option value="dark">Always dark</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="card mb-3 border-danger">
+        <div class="card-header py-2 text-danger">Danger zone</div>
+        <div class="card-body">
+            <p class="text-muted small mb-3">
+                Wipes every paired bootloader, every TOTP secret, and the
+                phone-side enclave key. After this, you'll need to re-pair
+                from scratch with each bootloader. The bootloader-side
+                phone entries become orphaned; revoke them from another
+                paired phone or via the bootloader's operator UI.
+            </p>
+            @if (!_confirmingUnpair)
+            {
+                <button class="btn btn-outline-danger"
+                        @onclick="@(() => _confirmingUnpair = true)">
+                    Unpair all bootloaders
+                </button>
+            }
+            else
+            {
+                <p class="fw-semibold text-danger mb-2">Are you sure? This cannot be undone.</p>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-danger"
+                            disabled="@_unpairing"
+                            @onclick="UnpairAllAsync">
+                        @(_unpairing ? "Wiping..." : "Yes, wipe everything")
+                    </button>
+                    <button class="btn btn-secondary"
+                            disabled="@_unpairing"
+                            @onclick="@(() => _confirmingUnpair = false)">
+                        Cancel
+                    </button>
+                </div>
+                @if (!string.IsNullOrEmpty(_unpairError))
+                {
+                    <p class="text-danger small mt-2">@_unpairError</p>
+                }
+            }
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header py-2">About</div>
+        <div class="card-body">
+            <dl class="row mb-0 small">
+                <dt class="col-sm-4">Recto version</dt>
+                <dd class="col-sm-8">v0.4.1</dd>
+                <dt class="col-sm-4">Protocol version</dt>
+                <dd class="col-sm-8">@Recto.Shared.Protocol.V04.V04Protocol.Version (v0.4)</dd>
+                <dt class="col-sm-4">Algorithm</dt>
+                <dd class="col-sm-8"><code>@EnclaveKeys.Algorithm</code></dd>
+                <dt class="col-sm-4">License</dt>
+                <dd class="col-sm-8">Apache 2.0</dd>
+            </dl>
+        </div>
+    </div>
+</div>
+
+@code {
+    private UserPreferences _settings = new();
+    private bool _savedFlash = false;
+    private bool _confirmingUnpair = false;
+    private bool _unpairing = false;
+    private string? _unpairError;
+    private const string KeyAlias = "recto.phone.identity";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = await Prefs.LoadAsync(CancellationToken.None);
+    }
+
+    private async Task OnSettingChanged()
+    {
+        await Prefs.SaveAsync(_settings, CancellationToken.None);
+        _savedFlash = true;
+        StateHasChanged();
+        await Task.Delay(1500);
+        _savedFlash = false;
+        StateHasChanged();
+    }
+
+    private async Task UnpairAllAsync()
+    {
+        _unpairing = true;
+        _unpairError = null;
+        StateHasChanged();
+        try
+        {
+            // Wipe pairing state, TOTP secrets, pin store, and enclave key.
+            // Order matters: wipe pairing FIRST so any in-flight poll loops
+            // see "no longer paired" before we tear down their backing keys.
+            await Pairing.SaveAsync(null, CancellationToken.None);
+            await Totp.ClearAllAsync(CancellationToken.None);
+            // No public ClearAll on IPinningService; iterate any captured pins
+            // and clear them. For now: we just delete the enclave key; pin
+            // store is per-circuit memory and rebuilds on next pair anyway.
+            await EnclaveKeys.DeleteAsync(KeyAlias, CancellationToken.None);
+            Nav.NavigateTo("/", forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            _unpairError = $"{ex.GetType().Name}: {ex.Message}";
+            _unpairing = false;
+            _confirmingUnpair = false;
+            StateHasChanged();
+        }
+    }
+}

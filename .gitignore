@@ -3,6 +3,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# AI-driven gitscript convention (Hard Rule #10): one-shot push scripts
+# written at repo root, executed once, deleted by the operator. Belt-and-
+# suspenders gitignore so a forgotten cleanup doesn't accidentally land
+# in a future commit. Both the conventional default name and the operator-
+# preferred alias are covered.
+git_push.ps1
+gitscript.ps1
+
 # Distribution / packaging
 .Python
 build/
@@ -96,3 +104,21 @@ pytest-cache-files-*
 /phone/**/Resources/Raw/.gitkeep
 /phone/**/*.user
 /phone/**/*.suo
+
+# Phone-app credential ceremony artifacts. Each operator deploying
+# Recto runs their own Apple Developer Program + Firebase Console
+# ceremony per dev-tools/README.md; the resulting credential files are
+# operator-specific and never get checked in. Forkers regenerate them
+# for their own bundle ID + Firebase project. Public Recto repo carries
+# only the wire-up that READS these files; the values stay on the
+# operator's machine.
+/phone/**/dev-tools/.fcm-service-account.json
+/phone/**/dev-tools/.apns-auth-key.p8
+/phone/**/dev-tools/.credentials.md
+/phone/**/google-services.json
+# Catch-alls so future credential files of these shapes are protected
+# even if the directory layout changes:
+/phone/**/*-firebase-adminsdk-*.json
+/phone/**/*.p8
+/phone/**/AuthKey_*.p8
+/phone/**/GoogleService-Info.plist

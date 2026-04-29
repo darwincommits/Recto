@@ -50,6 +50,18 @@ v0_4 = [
    # app itself is a separate MAUI Blazor project under /phone; this extra
    # only covers the Recto-side dependencies for the bootloader and the
    # in-process stub used for testing without phone hardware.
+ethereum = []
+   # `pip install recto[ethereum]` enables the eth_sign credential kind
+   # (recto.ethereum module: Keccak-256, EIP-191 / EIP-712 hashing,
+   # secp256k1 ECDSA verify + public-key recovery, EIP-55 checksum
+   # addresses). The implementation is pure Python stdlib — int /
+   # hashlib / no native dependencies — so this extra adds NO new
+   # packages to the dep tree. The empty list is intentional: the
+   # extra exists purely to gate the import path so consumers without
+   # ETH-credential needs can ignore the module. Sign-side primitives
+   # (BIP39 mnemonic, BIP32/BIP44 derivation, secp256k1 sign with
+   # v-recovery) live phone-side in the MAUI Blazor project, NOT in
+   # this Python module — private keys never touch the launcher tier.
 
 [project.urls]
 Homepage = "https://github.com/darwincommits/Recto"

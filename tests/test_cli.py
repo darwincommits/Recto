@@ -591,6 +591,357 @@ class TestSecretsListCommand:
 
 
 # ---------------------------------------------------------------------------
+# secrets set subcommand (backend-agnostic; default backend dpapi-machine)
+# ---------------------------------------------------------------------------
+
+
+class _StubWritableSource:
+    """SecretSource-ish stand-in supporting write() + delete() + list_names()
+    backed by a shared dict. Used to exercise `recto secrets set` and
+    `recto secrets delete` without needing the real DPAPI/CredMan backends.
+
+    The test installs this under whatever selector name the test cares
+    about (`dpapi-machine` / `credman` / `stub`) via the registry-swap
+    pattern from TestSecretsListCommand. The service-name parameter is
+    captured so the test can assert it gets threaded through.
+    """
+
+    def __init__(self, store: dict[tuple[str, str], str], service: str) -> None:
+        self._store = store
+        self._service = service
+
+    @property
+    def name(self) -> str:
+        return "stub-writable"
+
+    def fetch(self, secret_name: str, config: dict[str, Any]):
+        raise NotImplementedError
+
+    def write(self, secret_name: str, value: str, comment: str = "") -> None:
+        self._store[(self._service, secret_name)] = value
+
+    def delete(self, secret_name: str) -> None:
+        if (self._service, secret_name) not in self._store:
+            raise SecretNotFoundError(secret_name)
+        del self._store[(self._service, secret_name)]
+
+    def list_names(self) -> list[str]:
+        return sorted(
+            n for (svc, n) in self._store.keys() if svc == self._service
+        )
+
+
+class _StubReadOnlySource:
+    """SecretSource without write/delete -- e.g. a future read-only
+    external-vault backend. `recto secrets set --source ...` should
+    refuse to call it with a clear error rather than crashing on the
+    missing attribute."""
+
+    @property
+    def name(self) -> str:
+        return "stub-readonly"
+
+    def fetch(self, secret_name: str, config: dict[str, Any]):
+        raise NotImplementedError
+
+
+def _swap_registry(mapping: dict[str, Any]) -> dict[str, Any]:
+    """Reuse of TestSecretsListCommand's helper at module scope so the
+    set/delete test classes can also swap. Returns the original snapshot
+    for restoration."""
+    from recto.secrets import _SOURCE_FACTORIES
+
+    original = dict(_SOURCE_FACTORIES)
+    _SOURCE_FACTORIES.clear()
+    _SOURCE_FACTORIES.update(mapping)
+    return original
+
+
+def _restore_registry(original: dict[str, Any]) -> None:
+    from recto.secrets import _SOURCE_FACTORIES
+
+    _SOURCE_FACTORIES.clear()
+    _SOURCE_FACTORIES.update(original)
+
+
+class TestSecretsSetCommand:
+    """`recto secrets set <service> <name>` writes to whichever backend
+    `--source` selects (default: dpapi-machine). Mirror of
+    `recto credman set`'s safety guards (empty-prompt refusal, --value ''
+    explicit-empty allowance, etc.) but via the registry seam rather than
+    a credman_factory parameter."""
+
+    def test_set_default_source_is_dpapi_machine(self) -> None:
+        store: dict[tuple[str, str], str] = {}
+        original = _swap_registry(
+            {
+                "dpapi-machine": lambda svc: _StubWritableSource(store, svc),
+                "credman": lambda svc: _StubWritableSource(
+                    {("OTHER_SVC", "X"): "y"}, svc
+                ),
+            }
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                ["secrets", "set", "myservice", "MY_KEY", "--value", "the-value"],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 0
+            # Default backend is dpapi-machine, so the value lands there.
+            assert store[("myservice", "MY_KEY")] == "the-value"
+            assert "[dpapi-machine] installed" in out.getvalue()
+        finally:
+            _restore_registry(original)
+
+    def test_set_with_explicit_source_credman(self) -> None:
+        store: dict[tuple[str, str], str] = {}
+        original = _swap_registry(
+            {
+                "credman": lambda svc: _StubWritableSource(store, svc),
+            }
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                [
+                    "secrets",
+                    "set",
+                    "myservice",
+                    "MY_KEY",
+                    "--source",
+                    "credman",
+                    "--value",
+                    "v",
+                ],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 0
+            assert store[("myservice", "MY_KEY")] == "v"
+            assert "[credman] installed" in out.getvalue()
+        finally:
+            _restore_registry(original)
+
+    def test_set_prompts_when_value_omitted(self) -> None:
+        store: dict[tuple[str, str], str] = {}
+        prompts_seen: list[str] = []
+
+        def fake_prompt(p: str) -> str:
+            prompts_seen.append(p)
+            return "from-prompt"
+
+        original = _swap_registry(
+            {"dpapi-machine": lambda svc: _StubWritableSource(store, svc)}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                ["secrets", "set", "myservice", "MY_KEY"],
+                prompt=fake_prompt,
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 0
+            assert store[("myservice", "MY_KEY")] == "from-prompt"
+            assert len(prompts_seen) == 1
+            assert "MY_KEY" in prompts_seen[0]
+            assert "hidden" in prompts_seen[0].lower()
+        finally:
+            _restore_registry(original)
+
+    def test_set_empty_prompt_refuses(self) -> None:
+        store: dict[tuple[str, str], str] = {}
+        original = _swap_registry(
+            {"dpapi-machine": lambda svc: _StubWritableSource(store, svc)}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                ["secrets", "set", "myservice", "MY_KEY"],
+                prompt=lambda _p: "",  # operator just hit enter
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 1
+            assert "empty" in err.getvalue().lower()
+            assert ("myservice", "MY_KEY") not in store
+        finally:
+            _restore_registry(original)
+
+    def test_set_explicit_empty_value_via_flag_is_allowed(self) -> None:
+        store: dict[tuple[str, str], str] = {}
+        original = _swap_registry(
+            {"dpapi-machine": lambda svc: _StubWritableSource(store, svc)}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                ["secrets", "set", "myservice", "MY_KEY", "--value", ""],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 0
+            assert store[("myservice", "MY_KEY")] == ""
+        finally:
+            _restore_registry(original)
+
+    def test_set_unknown_source_returns_1(self) -> None:
+        original = _swap_registry({})
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                [
+                    "secrets",
+                    "set",
+                    "myservice",
+                    "MY_KEY",
+                    "--source",
+                    "no-such-backend",
+                    "--value",
+                    "v",
+                ],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 1
+            assert "no-such-backend" in err.getvalue()
+        finally:
+            _restore_registry(original)
+
+    def test_set_readonly_backend_returns_1(self) -> None:
+        original = _swap_registry(
+            {"readonly-vault": lambda _svc: _StubReadOnlySource()}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                [
+                    "secrets",
+                    "set",
+                    "myservice",
+                    "MY_KEY",
+                    "--source",
+                    "readonly-vault",
+                    "--value",
+                    "v",
+                ],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 1
+            assert "readonly-vault" in err.getvalue()
+            assert "write" in err.getvalue().lower()
+        finally:
+            _restore_registry(original)
+
+    def test_set_in_parser(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "secrets",
+                "set",
+                "myservice",
+                "MY_KEY",
+                "--source",
+                "credman",
+                "--value",
+                "v",
+            ]
+        )
+        assert args.command == "secrets"
+        assert args.secrets_command == "set"
+        assert args.service == "myservice"
+        assert args.name == "MY_KEY"
+        assert args.source == "credman"
+        assert args.value == "v"
+
+    def test_set_default_source_in_parser(self) -> None:
+        """Parser-level: --source defaults to dpapi-machine."""
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["secrets", "set", "myservice", "MY_KEY", "--value", "v"]
+        )
+        assert args.source == "dpapi-machine"
+
+
+class TestSecretsDeleteCommand:
+    """`recto secrets delete <service> <name>` removes from whichever
+    backend `--source` selects (default: dpapi-machine)."""
+
+    def test_delete_removes_existing_entry(self) -> None:
+        store: dict[tuple[str, str], str] = {("myservice", "KEY"): "v"}
+        original = _swap_registry(
+            {"dpapi-machine": lambda svc: _StubWritableSource(store, svc)}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                ["secrets", "delete", "myservice", "KEY"],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 0
+            assert ("myservice", "KEY") not in store
+            assert "[dpapi-machine] deleted" in out.getvalue()
+        finally:
+            _restore_registry(original)
+
+    def test_delete_missing_returns_1(self) -> None:
+        store: dict[tuple[str, str], str] = {}
+        original = _swap_registry(
+            {"dpapi-machine": lambda svc: _StubWritableSource(store, svc)}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                ["secrets", "delete", "myservice", "KEY"],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 1
+            assert "does not exist" in err.getvalue()
+        finally:
+            _restore_registry(original)
+
+    def test_delete_explicit_credman_source(self) -> None:
+        store: dict[tuple[str, str], str] = {("myservice", "KEY"): "v"}
+        original = _swap_registry(
+            {"credman": lambda svc: _StubWritableSource(store, svc)}
+        )
+        try:
+            out, err = _capture()
+            rc = cli.main(
+                [
+                    "secrets",
+                    "delete",
+                    "myservice",
+                    "KEY",
+                    "--source",
+                    "credman",
+                ],
+                stdout=out,
+                stderr=err,
+            )
+            assert rc == 0
+            assert ("myservice", "KEY") not in store
+        finally:
+            _restore_registry(original)
+
+    def test_delete_in_parser(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["secrets", "delete", "myservice", "KEY", "--source", "credman"]
+        )
+        assert args.command == "secrets"
+        assert args.secrets_command == "delete"
+        assert args.service == "myservice"
+        assert args.name == "KEY"
+        assert args.source == "credman"
+
+
+# ---------------------------------------------------------------------------
 # status subcommand
 # ---------------------------------------------------------------------------
 

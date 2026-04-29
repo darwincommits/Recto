@@ -8,32 +8,30 @@ repo, manually synced across machines — see that file for the sync recipe).
 
 ## Conversation startup ritual
 
-Before responding to the first message of a new conversation, load these in
-order:
+Before responding to the first message of a new conversation, an AI
+assistant should silently load these in order. Don't narrate the
+read-pass back to the user.
 
-1. **`%USERPROFILE%\private\local.md`** if it exists — operator-specific
-   overrides (machine identification, git author identity, infrastructure
-   notes, etc.). The file lives at user-home level, OUTSIDE any repo, so
-   it's shared across all sibling repos (Recto and any others) on the same
-   machine without per-repo duplication. **Cowork mount hint**: this path
-   lives at user-home, not inside any per-project mount; in a fresh
-   Cowork session, AI must call `request_cowork_directory` with the path
-   `%USERPROFILE%\private` first so the operator can approve mounting it,
-   THEN Read the file. Don't be alarmed if it's absent on a fresh clone
-   or on a new machine. (Path history: started at `.claude/local.md`
-   inside Recto; moved to `Recto/private/local.md` on 2026-04-26 morning
-   because Cowork's sandbox blocks AI Write/Edit on `.claude/` paths;
-   promoted to `%USERPROFILE%\private\local.md` later the same day so
-   all sibling repos share one canonical file. The in-repo `private/` dir
-   still exists as a scratch space for transient commit-message tempfiles,
-   but no longer holds long-term memory.)
+1. **`%USERPROFILE%\private\local.md`** (Windows) /
+   **`$HOME/private/local.md`** (macOS / Linux) if it exists —
+   operator-specific overrides (machine identification, git author
+   identity, infrastructure notes, etc.). The file lives at user-home
+   level, OUTSIDE any repo, so it's shared across all sibling repos
+   on the same machine without per-repo duplication. In a fresh
+   Cowork-style session, AI may need to call
+   `request_cowork_directory` to be granted access to that path before
+   reading. Don't be alarmed if the file is absent — it's
+   per-operator and won't exist on a fresh clone.
 2. **This file** — you're here.
 3. **`README.md`** — public pitch, status, license.
 4. **`ARCHITECTURE.md`** — design doc covering YAML schema, pluggable
    secret-source backends, NSSM relationship, threat model.
 5. **`ROADMAP.md`** — phasing: what's shipped, what's next, what's deferred.
 
-Don't narrate the read-pass back to the user.
+If the operator's `local.md` defines a multi-machine role-gate or a
+canonical fresh-conversation trigger phrase, follow what's in that
+file. The substrate is generic; specific deployment topologies belong
+in the operator's private memo.
 
 ## Hard rules (non-negotiable)
 
@@ -61,14 +59,57 @@ Don't narrate the read-pass back to the user.
    a new backend MUST NOT require changes to `recto.launcher` or any
    consumer's service.yaml beyond the `source:` selector. New backends
    declare themselves; the launcher stays generic.
-7. **AI-driven commits author as `Darwin`.** Never push under a generic AI
-   identity. The git config (name + email) for AI-driven commits lives in
-   `%USERPROFILE%\private\local.md`; load it before committing.
+7. **AI-driven commits author with the operator's chosen identity.**
+   Never push under a generic AI handle (e.g. "Claude AI"). The git
+   config (name + email) for AI-driven commits lives in the operator's
+   `local.md` private memo; load it before committing. Operators are
+   free to use a persona name for their AI collaborator (e.g. "Darwin",
+   "Athena", whatever they prefer) but the identity must be set
+   explicitly per-machine, not assumed.
 8. **No internal-detail leaks in committed files.** Operator-specific
    hostnames, usernames, internal domain names, sibling-repo names, specific
    consumer apps, and PAT or service-token names belong only in
    `%USERPROFILE%\private\local.md`. The committed tree should read like a generic OSS
    project a stranger could fork without learning the operator's setup.
+9. **Phone enclave is a generic capability provider; agents inherit
+   from humans.** When extending Recto's credential surface (TOTP,
+   WebAuthn, PKCS#11, PGP, etc.) each new credential type adds a
+   `PendingRequest.kind` constant and reuses the operator-gated
+   phone-side primitive — never bypasses operator approval, never
+   gives agents direct phone-side access. Agents access vault
+   capabilities only via operator-issued, scoped, time-bounded JWT
+   capabilities; the human's phone is the unconditional root of trust.
+   Hard corollary: never design a flow where an agent can act past
+   its capability's expiry, exceed its scope, or persist after
+   revocation. See ARCHITECTURE.md 2026-04-26 entry for the design
+   rationale.
+10. **AI-driven commits use the gitscript convention, not paste-into-chat
+    PowerShell blocks.** When an AI session is ready to commit + push the
+    work it just authored, it writes a one-shot `git_push.ps1` script at
+    the repo root containing the full staging / commit-message / commit /
+    push logic, then hands the operator a 3-line execution block:
+    ```
+    cd <repo root>
+    .\git_push.ps1 -DarwinName "<persona name>" -DarwinEmail "<persona email>"
+    Remove-Item .\git_push.ps1
+    ```
+    The script is created fresh each commit, encodes everything specific
+    to that sprint (which files to stage, which leftovers to delete, the
+    multi-paragraph commit message), takes the operator's persona identity
+    as parameters (so the operator's `%USERPROFILE%\private\local.md`
+    private memo is the only place that holds the actual name + email),
+    and is deleted by the operator immediately after the push completes.
+    Rationale: (a) PowerShell quoting hell is hostile to multi-paragraph
+    commit messages embedded in a chat-pasted command; (b) the script can
+    fail-fast on individual git steps with `$LASTEXITCODE` checks rather
+    than barreling forward when `git add` already failed; (c) the chat-
+    autolinking gotcha that converts `<word>.<py|md>` filenames into
+    pseudo-markdown links has burned us before — staging a long file list
+    in chat is exactly the surface that bites; (d) self-deletion after
+    push means the script never lives in repo history, so each one is an
+    AI-generated artifact specific to one session that doesn't accumulate.
+    The operator may rename the script to `gitscript.ps1` if they prefer;
+    `git_push.ps1` is the conventional default.
 
 ## Repo layout (matches what's on disk)
 
@@ -107,7 +148,8 @@ Recto/
 │       └── vault.py                   HashiCorp Vault (v0.3)
 ├── tests/
 ├── examples/                          example service.yaml files
-└── docs/                              install, service-config, secrets, threat-model
+├── docs/                              install, service-config, secrets, threat-model
+└── phone/RectoMAUIBlazor/             v0.4 phone app (MAUI Blazor) — see phone/RectoMAUIBlazor/CLAUDE.md
 ```
 
 ## "Update your IM" convention
@@ -234,6 +276,53 @@ in `%USERPROFILE%\private\local.md`.
   not found in source env (skipping)` so operators know the partition
   came out smaller than declared. Caught during second-consumer
   migration 2026-04-26.
+- **Cryptographic prefix bytes are non-negotiable; cross-validate
+  any new digest function against an external reference impl
+  before trusting it.** EIP-191 personal_sign hashes are
+  <c>keccak256(0x19 || "Ethereum Signed Message:\n" || len ||
+  msg)</c> — the leading <c>0x19</c> byte is the version-discriminator
+  per the spec. A C# implementation that omits it will produce
+  signatures that recover correctly within its own sign + verify
+  loop (internally self-consistent) but fail every external
+  verifier (MetaMask, ethers, viem, Solidity's <c>ECDSA.recover</c>
+  + <c>MessageHashUtils.toEthSignedMessageHash</c>). Symptom is
+  invisible without a reference cross-check: end-to-end Recto-only
+  testing shows "approved, signature verified, address recovered"
+  while the signature would be rejected by any real consumer.
+  Caught wave-4 (2026-04-28) by an xunit test that pinned the
+  expected hash literal against a known external value computed
+  from the canonical (correct) Python reference impl;
+  Recto-internal recovery had been masking the bug. **Rule: every
+  new cryptographic digest function ships with a test asserting a
+  known external reference value, not just an internal-consistency
+  round-trip.** Same principle applies to EIP-712 typed-data
+  hashing, RLP transaction hashing, and any future BIP-32 v2
+  derivation extension — pin against a value computed by another
+  toolchain, not against your own sign-then-recover loop.
+- **Embedded resource manifest names are <c>{RootNamespace}.{Folder}.{File}</c>;
+  moving a resource between projects changes the manifest name
+  and breaks lookups by literal string.** Wave-4 moved
+  <c>Bip39Wordlist</c> from <c>Recto/Services/</c> to
+  <c>Recto.Shared/Services/</c> and the embedded
+  <c>Resources/Bip39/english.txt</c> alongside it. The loader's
+  <c>GetManifestResourceStream("Recto.Resources.Bip39.english.txt")</c>
+  call (using the old project's RootNamespace prefix) returned
+  null after the move — silent until first use. **Rule when
+  moving an EmbeddedResource between projects: update the loader's
+  literal manifest-name string in the same commit. Always use the
+  new RootNamespace prefix.** Mitigation pattern: when the loader
+  returns null, throw a clear error naming both the expected path
+  AND the source-of-truth file path so the contributor sees the
+  cause immediately rather than chasing a NullReferenceException
+  three frames down. Caught during wave-4 refactor 2026-04-28.
+
+### Phone-app gotchas → moved
+
+The MAUI / iOS / Android phone-app gotchas (build / sign / Razor /
+enclave / etc.) used to live in this index. They were extracted to
+`phone/RectoMAUIBlazor/CLAUDE.md` to keep this file focused on
+substrate concerns. If you're working anywhere under `phone/`,
+read that file in addition to this one.
 
 ## Adoption history (non-identifying)
 
@@ -270,3 +359,297 @@ in `%USERPROFILE%\private\local.md`.
   side bugs. The substrate handled every rotation cleanly without a
   single launcher restart loop or decrypt failure across 10 rotated
   secrets + 2 service restarts.
+- **First "true vault-only" consumer state reached 2026-04-28.**
+  Closing pass on a consumer's two-phase migration: the plaintext
+  `.env` file that Phase A relied on (transcribed into NSSM
+  `AppEnvironmentExtra` so the migrator had something to read) was
+  deleted from the staging server. The consumer now runs with no
+  secret value on disk in plaintext anywhere on the host: every
+  secret lives in dpapi-machine-encrypted blobs that the launcher
+  decrypts at child-spawn and injects into the spawned child's env;
+  no secret is in NSSM `AppEnvironmentExtra` (the launcher reads
+  YAML + vault, not the registry); no secret is in any working tree.
+  The other consumer reached the same state the same day. Validates
+  the substrate's design intent — `.env` files are a migration aid,
+  not a long-term posture — and proves the dpapi-machine backend is
+  trusted enough to be the sole source of truth for production
+  secrets. A new secret minted later the same day (a freshly-issued
+  third-party API token) was stored vault-only from inception, never
+  passing through `.env` or `AppEnvironmentExtra`; that's the
+  expected default for any new secret going forward.
+
+## Active sprint — Bitcoin credential kind (next session 2026-04-29)
+
+Ethereum credential kind shipped end-to-end 2026-04-28 (four waves,
+landed + tested on live TLS-pinned Windows MAUI build, cross-wallet
+interop confirmed via canonical EIP-191 signature recovery in Python
++ MyCrypto, Trezor BIP-32 reference vector passing). Bitcoin is the
+sister implementation that picks up next session — same BIP-39
+mnemonic infrastructure, same BIP-32 derivation, same secp256k1
+signing, different paths + address encoding + signing format.
+
+**Why Bitcoin matters even though Ethereum already shipped**: the
+substrate's "phone-resident HD wallet" pitch needs both halves to
+land for the cryptocurrency-custody story to be complete. Ethereum
+covers the EVM family (mainnet, Base, Optimism, Arbitrum, Polygon,
+all the L2s); Bitcoin covers the original chain plus Lightning /
+Liquid / sidechains via PSBT-compatible flows. Together they cover
+80% of by-market-cap on-chain custody surface. Adding a third token
+(e.g. Solana) is small once the second has landed because the
+infrastructure pattern is fully proven.
+
+**What carries over from Ethereum (already built, all tested)**:
+- `Bip39Wordlist` — canonical 2048-word English wordlist embedded resource
+- `Bip39` — mnemonic gen / validation / PBKDF2-HMAC-SHA512 seed derivation
+- `Bip32` — master + child derivation, BIP-44 path parser (handles any path)
+- `EthSigningOps.SignWithRecovery` — secp256k1 ECDSA with RFC 6979 deterministic-k
+  (Bitcoin uses the same curve so this primitive ports directly)
+- The phone's BIP-39 mnemonic — Bitcoin derives from the SAME mnemonic at a
+  different BIP-44 path. One mnemonic, two coin trees, recoverable on every
+  BIP-39 wallet.
+
+**What's NEW for Bitcoin**:
+- **BIP-44 path**: `m/84'/0'/0'/0/N` for native SegWit (P2WPKH) — the modern
+  default. Optionally support `m/49'/0'/0'/0/N` (nested SegWit P2SH-P2WPKH)
+  and `m/44'/0'/0'/0/N` (legacy P2PKH) for compat with older wallets.
+- **Address encoding**: bech32 / bech32m for native SegWit (BIP-173 / BIP-350),
+  Base58Check for legacy. ~150 LOC of pure-stdlib encoding.
+- **PSBT (BIP-174)**: Bitcoin transaction signing isn't a one-shot like
+  EIP-191 — it's a multi-step protocol where partial signatures get
+  combined. Phone receives a PSBT, signs the inputs it controls, returns
+  the partially-signed PSBT. ~400 LOC, plus a verify-side parser. Most
+  complex piece of the Bitcoin sprint.
+- **Bitcoin message signing (legacy)**: `\x18Bitcoin Signed Message:\n` +
+  varint length + message, then double-SHA-256, then signed with secp256k1.
+  Different from EIP-191 in two ways: prefix magic byte (0x18 not 0x19)
+  and double-SHA-256 instead of Keccak-256. Trivial port from `EthSigningOps`.
+
+**Sprint plan for tomorrow (parallel structure to ETH waves):**
+
+1. **Wave 1 — Python verifier + protocol DTOs.** `recto.bitcoin` module
+   (bech32 encoding, double-SHA-256, secp256k1 verify reuses the existing
+   pure-stdlib code, address derivation from pubkey via HASH160). New
+   `BtcSign` PendingRequest kind, `BtcMessageKind` discriminator
+   (`message_signing` / `psbt`), `eth_*`-style context fields renamed
+   `btc_*`. Protocol RFC section in `docs/v0.4-protocol.md`. Tests
+   against canonical bech32 / Bitcoin signed-message vectors.
+
+2. **Wave 2 — Bootloader handler + mock parity.** Same shape as ETH
+   wave 2: `PendingRequest.new_btc(...)`, `_pending_to_wire` emits
+   `btc_*` fields, `_handle_respond` accepts `btc_signature_*` and
+   forwards through. Mock bootloader gets a "Queue BTC sign" button.
+
+3. **Wave 3 + 4 collapsed — phone-side service + Home.razor approval.**
+   `IBtcSignService` in Recto.Shared (interface mirrors `IEthSignService`),
+   `MauiBtcSignService` in Recto/Services/ using SAME mnemonic as ETH
+   under a NEW BIP-44 path tree. `BtcSigningOps` (or extend
+   `EthSigningOps` to share the secp256k1 primitive). Home.razor render
+   arm + dispatcher. Single deploy + test cycle since waves 3-4
+   collapse for ETH already proved the deploy/test discipline works.
+
+Estimated complexity: ~50% of the ETH sprint since most of the
+infrastructure is reusable. Most net-new code is the bech32 encoder
+and the PSBT parser/signer. PSBT can ship as `message_signing` first
+(Bitcoin signed-message verb, smaller scope than transactions) with
+PSBT as a follow-up if it stretches the session.
+
+---
+
+## Prior sprints (shipped)
+
+### Ethereum credential kind (4 waves, 2026-04-28; cross-wallet interop confirmed)
+
+Recto's existing credential kinds (TOTP, WebAuthn, JWT capability,
+PKCS#11, PGP) covered human-authentication and traditional-crypto
+ground but didn't hold cryptocurrency-style private keys. The
+Ethereum sprint added the first half of the cryptocurrency story —
+the EVM family. Bitcoin (next session) covers the other half.
+
+**Sprint scope (shipped end-to-end 2026-04-28):**
+
+Ethereum private-key credential kind. BIP39 mnemonic gen +
+BIP32/BIP44 derivation at `m/44'/60'/0'/0/0`, EIP-191 personal_sign
+end-to-end, public-key + address derivation, sign-then-recover
+internal-consistency test + Trezor reference vector cross-wallet
+interop test passing. Cross-wallet verified live in MyCrypto +
+Python `recto.ethereum.recover_address`. Live phone build
+(Windows MAUI Blazor) approved real signatures over TLS-pinned
+HTTPS.
+
+**Still ahead (follow-ups, non-blocking; tracked here to surface
+on read-pass when revisited):**
+
+- **ImportMnemonicAsync UI** — Settings page hookup so operators
+  can paste an existing mnemonic (e.g. from a Ledger recovery
+  phrase) and have Recto re-derive the same addresses. Capability
+  is in `IEthSignService`; just needs the UI form + biometric gate
+  + destructive-confirmation modal.
+- **ExportMnemonicAsync UI** — biometric-gated mnemonic display
+  for backup ceremony. One-time-display semantics: operator
+  confirms they wrote down the words by re-entering 3 of them at
+  random positions; mnemonic returns to hidden state after that.
+- **Multi-account picker in Settings** — derive accounts at
+  `m/44'/60'/0'/0/N` for N=1,2,3... with operator-named labels.
+  Today Home.razor only exposes the default account.
+- **EIP-712 typed-data + RLP transaction signing**. Today only
+  `personal_sign` is wired end-to-end on the phone; `typed_data`
+  and `transaction` short-circuit with "not yet implemented". EIP-712
+  is structured-hash code (~200 LOC); transaction is RLP encoding
+  + EIP-1559 / 2930 / legacy decoders (~300 LOC).
+- **Launcher-side bootloader-spawn integration**: when
+  `service.yaml` has a `spec.secrets[].source: enclave` with
+  `kind: eth_sign`, the launcher should construct + queue an ETH
+  PendingRequest via `state.add_pending(...)` rather than the
+  existing single_sign path. Today the only callers are the mock
+  bootloader and tests.
+- **Capability-JWT scope semantics for agent signing**: extend
+  `CapabilityJwtClaims` so an `agent:<id>` bearer JWT can authorize
+  a single ETH signing operation bounded by target contract,
+  method selector, value cap, gas cap, expiry — enforced
+  server-side before the digest is produced. Foundation for
+  agent-driven signing flows in any consumer with on-chain
+  authority requirements.
+- **Real-device deploy validation on Apple hardware**. Software
+  impl works on any MAUI target so this is "deploy and confirm"
+  rather than net-new code. Gated on Apple-platform build host
+  availability + Xcode / iOS-version DeviceSupport pairing
+  decisions (see phone/CLAUDE.md gotchas).
+
+**Architectural pattern these extend** (already proven by TOTP /
+WebAuthn / JWT credential kinds — see Hard Rule #9): the operator's
+phone is the unconditional root of trust. Agents access wallet-
+signing capabilities only via operator-issued, scoped, time-bounded
+JWT capabilities. The agent never gets the raw private key; it
+gets a capability that authorizes a single signing operation
+within bounds the operator approved on the phone-side. This is
+the model that lets a consumer's agent runtime safely sign
+on-chain actions on behalf of a human user: each agent
+invocation = one signing request to Recto = one operator-pre-
+authorized capability draw. The capability's scope (target
+contract, method selector, value cap, gas cap, expiry) is
+declared at issuance time and enforced server-side before the
+private-key material is unwrapped.
+
+**Sprint deliverables (parallels prior credential-kind sprints):**
+
+- New `eth_sign` and `btc_sign` PendingRequest kinds in the
+  protocol RFC.
+- IBootloaderClient extensions for the new kinds.
+- Mock bootloader handlers for both kinds (test vectors from
+  EIP-191/712 specs and BIP-174 specs).
+- Phone-side service (IEthSignService / IBtcSignService) with
+  MAUI implementations.
+- Home.razor handlers for the two new kinds, displaying the
+  signing context to the operator (which message / which TX) and
+  capturing per-call approval.
+- Unit tests covering signing test vectors, mnemonic round-trip,
+  derivation correctness.
+
+**CLI gap to fill alongside** (caught during a consumer's
+auth-rotation pass 2026-04-28; LANDED 2026-04-28): `recto secrets
+set <service> <name>` and `recto secrets delete <service> <name>`
+ship as backend-agnostic counterparts to the existing
+`recto credman set/delete`. Default backend is `dpapi-machine`
+because that's the production default for `LocalSystem`-running
+services. Mirrors the CredMan command's safety guards (empty-prompt
+refusal, hidden input). 13 new CLI tests cover happy paths plus
+readonly-backend / unknown-backend / empty-value edge cases.
+
+**ETH groundwork landed 2026-04-28 (first wave)**: `recto.ethereum`
+module (pure-stdlib Keccak-256 + EIP-191 hashing + secp256k1 ECDSA
+verify + public-key recovery + EIP-55 checksum addresses; 22 new
+tests against canonical vectors); new `recto[ethereum]` extra
+(intentionally empty — adds no packages); protocol DTO additions in
+`Recto.Shared.Protocol.V04` (new `EthSign` kind, `EthMessageKind`
+discriminator, ETH-specific context fields, `EthSignatureRsv` on
+`RespondRequest`); `docs/v0.4-protocol.md` "Ethereum signing
+capability (v0.5+)" section authored.
+
+**Bootloader-side wiring + mock parity landed 2026-04-28 (second
+wave)**: `PendingRequest.new_eth(...)` constructor + 7 optional
+ETH context fields on the dataclass with construction-time
+validation (kind / per-kind body field / address shape);
+`recto.bootloader.server`'s `_pending_to_wire` emits the ETH
+fields when `kind == "eth_sign"` (omitted for non-ETH kinds —
+regression-tested); `_handle_respond` extracts and structure-checks
+`eth_signature_rsv` on approvals and forwards through
+`_notify_resolved` alongside the existing Ed25519 envelope; mock
+bootloader (`phone/RectoMAUIBlazor/dev-tools/mock-bootloader.py`)
+gains an "ETH personal_sign" operator-UI button that queues an
+EIP-191 login-style message on Base (chain 8453) at
+`m/44'/60'/0'/0/0` and recovers + displays the signer address
+when the mock is launched from a Recto checkout; 23 new tests in
+`tests/test_bootloader_eth.py` covering construction validation,
+state persistence round-trip, and live-HTTP end-to-end (good
+Ed25519 + good rsv → ok; denied; missing rsv; malformed rsv;
+forged Ed25519; non-eth single_sign regression).
+
+**BIP-39 mnemonic + BIP-32/BIP-44 derivation landed 2026-04-28
+(fourth wave)**: `eth_derivation_path` promoted from advisory
+metadata to a real lookup parameter — phone now stores a 24-word
+BIP-39 mnemonic per alias and derives infinitely many addresses
+on demand. `Bip39Wordlist` (canonical 2048-word wordlist as
+embedded resource), `Bip39` (mnemonic gen + validation + seed
+derivation via PBKDF2-HMAC-SHA512), `Bip32` (master + child
+derivation, BIP-44 path parser) all in `Recto.Shared/Services/`.
+`MauiEthSignService` rewritten to mnemonic-only storage with
+in-memory derivation per sign + ZeroMemory wipe of all
+intermediates. Mnemonics interoperable with every other BIP-39
+wallet (MetaMask, Ledger, Trezor) — Trezor reference vector
+("abandon ... about" → m/44'/60'/0'/0/0 →
+0x9858EfFD232B4033E47d90003D41EC34EcaEda94) confirmed by unit
+test. ~30 new tests in `Recto.Shared.Tests/`. Home.razor approval
+card now shows the derived address inline so operators see which
+account will sign before approving. Crypto classes moved from
+`Recto/Services/` to `Recto.Shared/Services/` (with BouncyCastle +
+wordlist resource) so the test project can reach them via the
+existing project reference. **Breaking change**: v0.5+ first-cut
+testers' single-key SecureStorage entries are no longer read by
+any wave-4 code path; first wave-4 sign generates a fresh
+mnemonic + new address tree. Cleared via `ClearAsync` (which
+cleans up both new mnemonic + legacy single-key entries).
+
+**Phone-side signing + Home.razor approval UI landed 2026-04-28
+(third wave)**: `IEthSignService` interface in
+`Recto.Shared/Services/` (cross-platform contract:
+EnsureMnemonic / GetAccount / Exists / SignPersonalSign /
+Clear); `EthAccount(DerivationPath, Address)` value object in
+`Recto.Shared/Models/`; `EthSigningOps` static class in
+`Recto/Services/` (pure BouncyCastle math: secp256k1 keygen,
+public-key + address derivation, Keccak-256, EIP-191 hash,
+RFC 6979 deterministic-k ECDSA sign with low-s canonicalization
++ v-recovery, SEC1 §4.1.6 public-key recovery for v-recovery's
+own use); `MauiEthSignService` SecureStorage-backed
+orchestrator in `Recto/Services/` (one secp256k1 keypair per
+alias under storage key `recto.phone.eth.{alias}`,
+implicit-create-on-use); DI registration as a single
+cross-platform singleton in `MauiProgram.cs` (no `#if IOS /
+ANDROID` fan-out since neither Secure Enclave nor StrongBox
+support secp256k1 — the software impl IS the correct long-term
+implementation, not a fallback); Home.razor render arm
+displaying chain id (mainnet / Base / Sepolia / Polygon /
+Optimism / Arbitrum / Base Sepolia named, "chain N" otherwise) +
+derivation path + message text + ApproveEthSignAsync dispatcher
+producing the dual signature (secp256k1 rsv via IEthSignService
++ Ed25519 envelope via IEnclaveKeyService) and forwarding both
+via RespondRequest. v0.5+ scope: NO BIP39 mnemonic, NO BIP32/BIP44
+derivation — `eth_derivation_path` field is advisory metadata;
+single key per alias regardless of path. Mock bootloader
+placeholder-address suppression so test queues with
+`0x` + `00`*20 as the expected address don't flag amber
+"differs from expected" on every successful round-trip.
+
+The protocol + Python launcher / verifier + mock bootloader +
+Windows-MAUI phone path are a complete loop. End-to-end demo:
+Queue ETH personal_sign (mock UI) → Approve (phone) → secp256k1
+sign + Ed25519 envelope → mock recovers signer address from rsv
+→ operator UI shows "recovered: 0x..." inline. Live tested
+2026-04-28 with cross-wallet interop confirmed via MyCrypto +
+Python `recto.ethereum.recover_address` against multiple
+sequential signatures.
+
+Major-token-credential-kinds sprint exits fully when Bitcoin
+also lands (next session). After that, downstream consumers can
+begin binding user wallets to platform identities and rotating
+any on-chain authority roles (e.g. minter / signer keys) onto
+Recto-custodied addresses.

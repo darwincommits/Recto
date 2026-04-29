@@ -30,7 +30,7 @@ pip install recto[otel]
 For development:
 
 ```
-git clone https://github.com/darwincommits/Recto
+git clone https://github.com/<your-fork>/Recto
 cd Recto
 pip install -e ".[dev]"
 pytest

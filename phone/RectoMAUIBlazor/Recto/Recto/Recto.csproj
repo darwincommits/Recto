@@ -1,0 +1,98 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+	<PropertyGroup>
+		<TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0-windows10.0.19041.0</TargetFrameworks>
+		<!-- Note for MacCatalyst:
+      The default runtime is maccatalyst-x64, except in Release config, in which case the default is maccatalyst-x64;maccatalyst-arm64.
+      When specifying both architectures, use the plural <RuntimeIdentifiers> instead of the singular <RuntimeIdentifier>.
+      The Mac App Store will NOT accept apps with ONLY maccatalyst-arm64 indicated;
+      either BOTH runtimes must be indicated or ONLY macatalyst-x64. -->
+		<!-- For example: <RuntimeIdentifiers>maccatalyst-x64;maccatalyst-arm64</RuntimeIdentifiers> -->
+		<OutputType>Exe</OutputType>
+		<RootNamespace>Recto</RootNamespace>
+		<UseMaui>true</UseMaui>
+		<SingleProject>true</SingleProject>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<EnableDefaultCssItems>false</EnableDefaultCssItems>
+		<Nullable>enable</Nullable>
+		<!-- Enable XAML source generation for faster build times. -->
+		<MauiXamlInflator>SourceGen</MauiXamlInflator>
+		<!-- Display name -->
+		<ApplicationTitle>Recto</ApplicationTitle>
+		<!-- App Identifier -->
+		<ApplicationId>app.recto.phone</ApplicationId>
+		<!-- Versions -->
+		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<ApplicationVersion>1</ApplicationVersion>
+		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
+		<WindowsPackageType>None</WindowsPackageType>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">24.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
+		<TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
+		<!-- Suppress NETSDK1082 for client RIDs in preview, plus WMC1006 and CS1591 for clean output -->
+		<NoWarn>$(NoWarn);NETSDK1082;WMC1006;CS1591</NoWarn>
+	</PropertyGroup>
+	<!-- iOS device build: wire APNs entitlement + keep full code signing
+	     (real Apple Development cert + provisioning profile required). -->
+	<PropertyGroup Condition="$(TargetFramework.Contains('-ios')) AND '$(RuntimeIdentifier)' == 'ios-arm64'">
+		<CodesignEntitlements>Platforms/iOS/Entitlements.plist</CodesignEntitlements>
+	</PropertyGroup>
+	<!-- iOS Simulator build: signing must stay ON (modern iOS Simulator
+	     refuses to launch unsigned binaries; crashes with
+	     "Namespace CODESIGNING, Code 2, Invalid Page" in the termination
+	     reason and the bundle gets denylisted by SpringBoard). What we
+	     need is signing-without-a-provisioning-profile: ad-hoc signing
+	     (CodesignKey='-' tells codesign to sign with a self-attested
+	     identity that simulator accepts) plus suppressing the
+	     provisioning-profile requirement that the _DetectSigningIdentity
+	     MSBuild target enforces by default. No entitlements applied
+	     (simulator doesn't have APNs anyway). -->
+	<PropertyGroup Condition="$(TargetFramework.Contains('-ios')) AND ('$(RuntimeIdentifier)' == 'iossimulator-arm64' OR '$(RuntimeIdentifier)' == 'iossimulator-x64' OR '$(RuntimeIdentifier)' == '')">
+		<CodesignKey>-</CodesignKey>
+		<CodesignRequireProvisioningProfile>false</CodesignRequireProvisioningProfile>
+	</PropertyGroup>
+	<ItemGroup>
+		<!-- App Icon -->
+		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#1E1B4B" />
+		<!-- Splash Screen -->
+		<MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#1E1B4B" BaseSize="128,128" />
+		<!-- Images -->
+		<MauiImage Include="Resources\Images\*" />
+		<MauiImage Update="Resources\Images\dotnet_bot.svg" BaseSize="168,208" />
+		<!-- Custom Fonts -->
+		<MauiFont Include="Resources\Fonts\*" />
+		<!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
+		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" />
+		<PackageReference Include="Microsoft.Extensions.Http" />
+		<PackageReference Include="Microsoft.Maui.Controls" />
+		<PackageReference Include="Microsoft.AspNetCore.Components.WebView.Maui" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Debug" />
+		<PackageReference Include="Microsoft.Maui.Controls.Compatibility" />
+		<!-- BouncyCastle dropped from Recto/ wave 4 — the crypto classes
+		     (EthSigningOps, Bip39, Bip32, Bip39Wordlist) moved to
+		     Recto.Shared so they're reachable from Recto.Shared.Tests.
+		     The package reference + embedded wordlist resource live
+		     there. MauiEthSignService stays here because it depends on
+		     Microsoft.Maui.Storage. -->
+	</ItemGroup>
+	<ItemGroup Condition="$(TargetFramework.Contains('-android'))">
+		<PackageReference Include="Xamarin.AndroidX.Biometric" />
+		<PackageReference Include="Xamarin.Firebase.Messaging" />
+		<!-- Picked up by the Xamarin.Firebase.Messaging build target. The
+		     file is dropped into Platforms/Android/ during the Firebase
+		     Console ceremony (see dev-tools/README.md Track A) and is
+		     gitignored as part of the entire phone/ tree. The conditional
+		     Exists() guard avoids the build failing when the file isn't
+		     yet present, e.g. when building the iOS / Mac Catalyst /
+		     Windows targets only. -->
+		<GoogleServicesJson Include="Platforms\Android\google-services.json"
+		                    Condition="Exists('Platforms\Android\google-services.json')" />
+	</ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\Recto.Shared\Recto.Shared.csproj" />
+	</ItemGroup>
+</Project>

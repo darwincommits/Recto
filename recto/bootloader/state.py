@@ -141,10 +141,29 @@ class Session:
 
 @dataclass(frozen=True, slots=True)
 class PendingRequest:
-    """A sign request waiting for phone approval."""
+    """A sign request waiting for phone approval.
+
+    Kind values that ship today:
+
+    - ``"session_issuance"`` — phone signs a 24h JWT for the
+      (service, secret) pair. Existing v0.4.0 flow.
+    - ``"single_sign"`` — phone signs a one-shot payload. Existing
+      v0.4.0 flow.
+    - ``"totp_provision"`` / ``"totp_generate"`` — TOTP universal-vault
+      flow (round 5).
+    - ``"webauthn_assert"`` — passkey browser-login bridge (round 8).
+    - ``"pkcs11_sign"`` / ``"pgp_sign"`` — v0.4.1 protocol seams.
+    - ``"eth_sign"`` — Ethereum signing capability (v0.5+ groundwork).
+      Populates the seven ``eth_*`` fields below; uses the same
+      ``payload_hash_b64u`` Ed25519 envelope as ``single_sign`` so
+      the bootloader still proves the response came from the paired
+      phone, and additionally surfaces ``eth_signature_rsv`` on the
+      respond body for the consumer (smart contract / off-chain
+      verifier) to validate.
+    """
 
     request_id: str
-    kind: str  # "session_issuance" | "single_sign"
+    kind: str
     service: str
     secret: str
     phone_id: str
@@ -154,6 +173,20 @@ class PendingRequest:
     child_argv0: str
     requested_at_unix: int
     expires_at_unix: int
+
+    # ETH-specific context (kind == "eth_sign"). All optional with
+    # default None so non-ETH PendingRequests keep working without
+    # construction-site changes. The seven fields mirror the C#
+    # `PendingRequestContext` ETH additions in
+    # `Recto.Shared.Protocol.V04`. See `docs/v0.4-protocol.md`
+    # "Ethereum signing capability (v0.5+)".
+    eth_chain_id: int | None = None
+    eth_message_kind: str | None = None  # "personal_sign" | "typed_data" | "transaction"
+    eth_address: str | None = None  # 0x-prefixed lowercase hex (40 chars after 0x)
+    eth_derivation_path: str | None = None  # default "m/44'/60'/0'/0/0"
+    eth_message_text: str | None = None  # for personal_sign
+    eth_typed_data_json: str | None = None  # for typed_data (EIP-712)
+    eth_transaction_json: str | None = None  # for transaction (RLP) — reserved
 
     @classmethod
     def new(
@@ -182,6 +215,88 @@ class PendingRequest:
             child_argv0=child_argv0,
             requested_at_unix=now,
             expires_at_unix=now + ttl_seconds,
+        )
+
+    @classmethod
+    def new_eth(
+        cls,
+        *,
+        service: str,
+        secret: str,
+        phone_id: str,
+        operation_description: str,
+        payload_hash_b64u: str,
+        child_pid: int,
+        child_argv0: str,
+        eth_chain_id: int,
+        eth_message_kind: str,
+        eth_address: str,
+        eth_derivation_path: str = "m/44'/60'/0'/0/0",
+        eth_message_text: str | None = None,
+        eth_typed_data_json: str | None = None,
+        eth_transaction_json: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> PendingRequest:
+        """Construct an ``eth_sign`` PendingRequest with the seven
+        Ethereum-specific context fields populated.
+
+        Validates that ``eth_message_kind`` is one of the three
+        protocol-defined values and that exactly one of the three
+        per-kind body fields (``eth_message_text`` /
+        ``eth_typed_data_json`` / ``eth_transaction_json``) is
+        populated to match. Raises ``ValueError`` on either failure;
+        consumers (the launcher, the mock bootloader operator-UI)
+        are expected to validate at construction time so a
+        malformed request never lands on the queue.
+        """
+        if eth_message_kind not in ("personal_sign", "typed_data", "transaction"):
+            raise ValueError(
+                f"eth_message_kind must be one of "
+                f"'personal_sign'|'typed_data'|'transaction', "
+                f"got {eth_message_kind!r}"
+            )
+        body_fields = {
+            "personal_sign": eth_message_text,
+            "typed_data": eth_typed_data_json,
+            "transaction": eth_transaction_json,
+        }
+        expected = body_fields[eth_message_kind]
+        if expected is None or expected == "":
+            field_name = {
+                "personal_sign": "eth_message_text",
+                "typed_data": "eth_typed_data_json",
+                "transaction": "eth_transaction_json",
+            }[eth_message_kind]
+            raise ValueError(
+                f"eth_message_kind={eth_message_kind!r} requires {field_name} to be set"
+            )
+        # Reject obviously-wrong addresses early; full EIP-55 validation
+        # happens phone-side when the BIP32 derivation runs.
+        addr_clean = eth_address.lower()
+        if not addr_clean.startswith("0x") or len(addr_clean) != 42:
+            raise ValueError(
+                f"eth_address must be 0x-prefixed 42-char hex, got {eth_address!r}"
+            )
+        now = int(time.time())
+        return cls(
+            request_id=str(uuid.uuid4()),
+            kind="eth_sign",
+            service=service,
+            secret=secret,
+            phone_id=phone_id,
+            operation_description=operation_description,
+            payload_hash_b64u=payload_hash_b64u,
+            child_pid=child_pid,
+            child_argv0=child_argv0,
+            requested_at_unix=now,
+            expires_at_unix=now + ttl_seconds,
+            eth_chain_id=eth_chain_id,
+            eth_message_kind=eth_message_kind,
+            eth_address=addr_clean,
+            eth_derivation_path=eth_derivation_path,
+            eth_message_text=eth_message_text,
+            eth_typed_data_json=eth_typed_data_json,
+            eth_transaction_json=eth_transaction_json,
         )
 
     @property

@@ -8,6 +8,14 @@ Subcommands:
     recto credman list <service>              - list installed secret names
                                                 for a service
     recto credman delete <service> <name>     - remove an installed secret
+    recto secrets set <service> <name>        - install a secret in any
+                                                registered backend
+                                                (default: dpapi-machine).
+                                                Backend-agnostic counterpart
+                                                to `recto credman set`.
+    recto secrets delete <service> <name>     - remove an installed secret
+                                                from any registered backend
+                                                (default: dpapi-machine).
     recto status <service>                    - report NSSM service state
     recto migrate-from-nssm <service>         - read NSSM config, generate
                                                 YAML, import secrets to
@@ -140,7 +148,31 @@ def build_parser() -> argparse.ArgumentParser:
         "secrets", help="Backend-agnostic secret operations.",
     )
     sub_secrets = p_secrets.add_subparsers(
-        dest="secrets_command", required=True, metavar="{list}",
+        dest="secrets_command", required=True, metavar="{set,list,delete}",
+    )
+    p_secrets_set = sub_secrets.add_parser(
+        "set",
+        help=(
+            "Install (or replace) a secret in any registered backend. "
+            "Backend-agnostic counterpart to `recto credman set`. The "
+            "default backend is `dpapi-machine` because that's the "
+            "production default for service-context decryption "
+            "(LocalSystem services can read it; CredMan is per-user)."
+        ),
+    )
+    p_secrets_set.add_argument("service")
+    p_secrets_set.add_argument("name")
+    p_secrets_set.add_argument(
+        "--source",
+        default="dpapi-machine",
+        help=(
+            "Which registered backend to write to (e.g. credman, "
+            "dpapi-machine). Default: dpapi-machine."
+        ),
+    )
+    p_secrets_set.add_argument(
+        "--value",
+        help="Pass the value directly instead of prompting (input hidden by default).",
     )
     p_secrets_list = sub_secrets.add_parser(
         "list",
@@ -151,6 +183,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_secrets_list.add_argument("service")
+    p_secrets_delete = sub_secrets.add_parser(
+        "delete",
+        help=(
+            "Remove an installed secret from any registered backend "
+            "(default: dpapi-machine). Backend-agnostic counterpart to "
+            "`recto credman delete`."
+        ),
+    )
+    p_secrets_delete.add_argument("service")
+    p_secrets_delete.add_argument("name")
+    p_secrets_delete.add_argument(
+        "--source",
+        default="dpapi-machine",
+        help="Which registered backend to delete from. Default: dpapi-machine.",
+    )
 
     # status
     p_status = sub.add_parser("status", help="Report NSSM service state.")
@@ -252,8 +299,12 @@ def main(
             return 2
         if cmd == "secrets":
             sub = args.secrets_command
+            if sub == "set":
+                return _cmd_secrets_set(args, prompt=prompt, out=out, err=err)
             if sub == "list":
                 return _cmd_secrets_list(args, out=out, err=err)
+            if sub == "delete":
+                return _cmd_secrets_delete(args, out=out, err=err)
             print(f"recto secrets: unknown subcommand {sub!r}", file=err)
             return 2
         if cmd == "status":
@@ -296,7 +347,8 @@ def _detect_user_objectname_mismatch(nssm, service: str) -> tuple[str, str] | No
     The mismatch matters because Windows Credential Manager is per-user
     (CRED_PERSIST_LOCAL_MACHINE only persists across logons of the SAME
     user, not across users). If the service runs as LocalSystem and the
-    migrator runs as Erik, the service won't see Erik's CredMan entries.
+    operator runs the migrator as themselves, the service won't see the
+    operator's CredMan entries.
 
     Heuristic:
         - Any of {"LocalSystem", "NT AUTHORITY\\SYSTEM",
@@ -304,7 +356,7 @@ def _detect_user_objectname_mismatch(nssm, service: str) -> tuple[str, str] | No
           SYSTEM; the migrating user is almost certainly not SYSTEM.
         - "NT AUTHORITY\\NetworkService" / "NT AUTHORITY\\LocalService"
           are also service accounts the operator probably can't match.
-        - Any other ObjectName (a real user account like "DOMAIN\\Erik")
+        - Any other ObjectName (a real user account like "DOMAIN\\user")
           is compared case-insensitively to the current username.
 
     On non-Windows we don't have a meaningful current user concept for
@@ -417,6 +469,103 @@ def _cmd_credman_delete(args, *, cred, out, err):
         print(f"recto credman delete: {exc}", file=err)
         return 1
     print(f"deleted recto:{service}:{name}", file=out)
+    return 0
+
+
+def _cmd_secrets_set(args, *, prompt, out, err):
+    """Backend-agnostic secret install (counterpart to `recto credman set`).
+
+    Resolves the requested backend via the secrets registry and calls
+    its `write()` method. The default backend is `dpapi-machine` because
+    that's the production default for any service running under
+    `LocalSystem` (CredMan is per-user and produces ERROR_NOT_FOUND when
+    the service account differs from the writing user).
+
+    Refuses to install an empty value unless `--value ''` is passed
+    explicitly, mirroring `recto credman set`'s safety guard. Empty
+    values are almost always a paste error; the explicit form is the
+    way to say "I really do mean a zero-length secret."
+
+    Test injection: the resolution path goes through
+    `recto.secrets.resolve_source`, which respects any
+    `register_source` overrides installed by tests. There is no
+    `secrets_factory` parameter on `main()` because the registry IS
+    the seam — tests register a fake backend under a chosen selector
+    name and pass `--source <that-name>`.
+    """
+    from recto.secrets import resolve_source
+
+    service, name, source_name = args.service, args.name, args.source
+    if args.value is not None:
+        value = args.value
+    else:
+        value = prompt(f"Value for recto:{service}:{name} (input hidden): ")
+        if not value:
+            print(
+                "recto secrets set: refusing to install empty value; "
+                "use --value '' if you really mean it",
+                file=err,
+            )
+            return 1
+    try:
+        source = resolve_source(source_name, service)
+    except SecretSourceError as exc:
+        print(f"recto secrets set: {exc}", file=err)
+        return 1
+    write_fn = getattr(source, "write", None)
+    if write_fn is None or not callable(write_fn):
+        print(
+            f"recto secrets set: backend {source_name!r} does not support "
+            f"write() (read-only or external-vault backend)",
+            file=err,
+        )
+        return 1
+    try:
+        write_fn(name, value)
+    except SecretSourceError as exc:
+        print(f"recto secrets set: {exc}", file=err)
+        return 1
+    print(f"[{source_name}] installed recto:{service}:{name}", file=out)
+    return 0
+
+
+def _cmd_secrets_delete(args, *, out, err):
+    """Backend-agnostic secret deletion (counterpart to `recto credman delete`).
+
+    Defaults to `dpapi-machine` for symmetry with `recto secrets set`.
+    Returns exit code 1 if the secret doesn't exist (rather than silently
+    succeeding) so operator scripts can distinguish "deleted" from
+    "wasn't there."
+    """
+    from recto.secrets import resolve_source
+
+    service, name, source_name = args.service, args.name, args.source
+    try:
+        source = resolve_source(source_name, service)
+    except SecretSourceError as exc:
+        print(f"recto secrets delete: {exc}", file=err)
+        return 1
+    delete_fn = getattr(source, "delete", None)
+    if delete_fn is None or not callable(delete_fn):
+        print(
+            f"recto secrets delete: backend {source_name!r} does not support "
+            f"delete() (read-only or external-vault backend)",
+            file=err,
+        )
+        return 1
+    try:
+        delete_fn(name)
+    except SecretNotFoundError:
+        print(
+            f"recto secrets delete: [{source_name}] recto:{service}:{name} "
+            f"does not exist",
+            file=err,
+        )
+        return 1
+    except SecretSourceError as exc:
+        print(f"recto secrets delete: {exc}", file=err)
+        return 1
+    print(f"[{source_name}] deleted recto:{service}:{name}", file=out)
     return 0
 
 

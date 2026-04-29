@@ -316,18 +316,34 @@ class BootloaderHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _pending_to_wire(p: PendingRequest) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "child_pid": p.child_pid,
+            "child_argv0": p.child_argv0,
+            "requested_at_unix": p.requested_at_unix,
+            "operation_description": p.operation_description,
+            "payload_hash_b64u": p.payload_hash_b64u,
+        }
+        # ETH-specific context fields. Emitted only when actually set so
+        # non-ETH kinds keep an unchanged wire shape (kept-keys minimal,
+        # easier to assert in tests). Mirrors the C# PendingRequestContext
+        # additions in Recto.Shared.Protocol.V04.
+        if p.kind == "eth_sign":
+            context["eth_chain_id"] = p.eth_chain_id
+            context["eth_message_kind"] = p.eth_message_kind
+            context["eth_address"] = p.eth_address
+            context["eth_derivation_path"] = p.eth_derivation_path
+            if p.eth_message_text is not None:
+                context["eth_message_text"] = p.eth_message_text
+            if p.eth_typed_data_json is not None:
+                context["eth_typed_data_json"] = p.eth_typed_data_json
+            if p.eth_transaction_json is not None:
+                context["eth_transaction_json"] = p.eth_transaction_json
         return {
             "request_id": p.request_id,
             "kind": p.kind,
             "service": p.service,
             "secret": p.secret,
-            "context": {
-                "child_pid": p.child_pid,
-                "child_argv0": p.child_argv0,
-                "requested_at_unix": p.requested_at_unix,
-                "operation_description": p.operation_description,
-                "payload_hash_b64u": p.payload_hash_b64u,
-            },
+            "context": context,
         }
 
     # ------------------------------------------------------------------
@@ -350,6 +366,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             # similar) is the launcher's responsibility; the bootloader
             # just marks the pending as resolved-with-denial.
             self._notify_resolved(req, ok=False, signature_b64u=None,
+                                  eth_signature_rsv=None,
                                   reason=body.get("reason", "denied"))
             self._send_json(HTTPStatus.OK, {"resolved": True})
             return
@@ -362,6 +379,10 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         # Verify the phone's signature over the payload hash.
         # The phone signs the BLAKE2b-256 hash, not the raw payload,
         # so we verify against the hash bytes.
+        # For kind=="eth_sign" this Ed25519 envelope still applies — it
+        # proves the response came from the paired phone. The Ethereum
+        # secp256k1 r||s||v signature rides alongside as an opaque
+        # forwarded value (see protocol RFC §"Approval response").
         padding = "=" * (-len(req.payload_hash_b64u) % 4)
         hash_bytes = base64.urlsafe_b64decode(req.payload_hash_b64u + padding)
         ok = verify_signature(
@@ -371,9 +392,44 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         )
         if not ok:
             self._notify_resolved(req, ok=False, signature_b64u=None,
+                                  eth_signature_rsv=None,
                                   reason="signature verification failed")
             raise BootloaderError("approved-response signature invalid")
-        self._notify_resolved(req, ok=True, signature_b64u=sig, reason=None)
+        # Extract the Ethereum signature when the kind is eth_sign. Per
+        # the protocol RFC the bootloader does NOT validate the secp256k1
+        # signature itself — that's the consumer's responsibility (smart
+        # contract on chain, off-chain verifier, capability-JWT scope
+        # enforcer, etc.). We just enforce a structural shape so a
+        # malformed rsv doesn't propagate downstream silently.
+        eth_sig = None
+        if req.kind == "eth_sign":
+            eth_sig = body.get("eth_signature_rsv")
+            if not isinstance(eth_sig, str) or not eth_sig:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      reason="eth_signature_rsv missing on eth_sign approval")
+                raise BootloaderError(
+                    "eth_sign approval missing eth_signature_rsv"
+                )
+            cleaned = eth_sig[2:] if eth_sig.startswith(("0x", "0X")) else eth_sig
+            if len(cleaned) != 130:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      reason="eth_signature_rsv wrong length")
+                raise BootloaderError(
+                    f"eth_signature_rsv must be 130 hex chars after optional 0x prefix, got {len(cleaned)}"
+                )
+            try:
+                bytes.fromhex(cleaned)
+            except ValueError as exc:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      reason="eth_signature_rsv not hex")
+                raise BootloaderError(
+                    f"eth_signature_rsv must be hex, got {exc}"
+                ) from exc
+        self._notify_resolved(req, ok=True, signature_b64u=sig,
+                              eth_signature_rsv=eth_sig, reason=None)
         self._send_json(HTTPStatus.OK, {"resolved": True})
 
     def _notify_resolved(
@@ -383,6 +439,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         ok: bool,
         signature_b64u: str | None,
         reason: str | None,
+        eth_signature_rsv: str | None = None,
     ) -> None:
         """Surface a request resolution to the waiting launcher.
 
@@ -390,10 +447,31 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         request_id -> threading.Event / Future. For v0.4.0 this is
         intentionally a no-op stub -- the integration hook lives on
         the BootloaderConfig and tests inject their own callable.
+
+        ``eth_signature_rsv`` is populated only when ``req.kind ==
+        "eth_sign"`` and the operator approved; the launcher forwards
+        the rsv hex to the consumer (smart contract / off-chain
+        verifier) without further validation. ``signature_b64u`` is
+        the Ed25519 paired-phone identity proof and is populated for
+        every approval regardless of kind.
         """
         notify_fn = getattr(self.config, "notify_resolved_fn", None)
         if notify_fn is not None:
-            notify_fn(req=req, ok=ok, signature_b64u=signature_b64u, reason=reason)
+            # Be tolerant of older notify_fn signatures that don't
+            # accept the eth_signature_rsv kwarg — fall back to
+            # calling without it. Tests injected before the ETH batch
+            # may use 4-arg signatures; we don't want to break them.
+            try:
+                notify_fn(
+                    req=req,
+                    ok=ok,
+                    signature_b64u=signature_b64u,
+                    eth_signature_rsv=eth_signature_rsv,
+                    reason=reason,
+                )
+            except TypeError:
+                notify_fn(req=req, ok=ok, signature_b64u=signature_b64u,
+                          reason=reason)
 
     # ------------------------------------------------------------------
     # Helpers

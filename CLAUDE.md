@@ -27,6 +27,11 @@ read-pass back to the user.
 4. **`ARCHITECTURE.md`** — design doc covering YAML schema, pluggable
    secret-source backends, NSSM relationship, threat model.
 5. **`ROADMAP.md`** — phasing: what's shipped, what's next, what's deferred.
+6. **`docs/MAC-SETUP.md`** if the operator is on a Mac host running
+   the MAUI Blazor phone app or a self-hosted GitHub Actions
+   runner — covers iOS device deploy, the Apple Developer Program
+   ceremony, the macOS pytest-on-self-hosted-runner workflow, and
+   recovery patterns for runner self-update corruption.
 
 If the operator's `local.md` defines a multi-machine role-gate or a
 canonical fresh-conversation trigger phrase, follow what's in that
@@ -466,6 +471,36 @@ top coins covered.** Wave 7 part 1 (UI redesign + Python coin
 parameter, 2026-04-29) and part 2 (C# protocol DTOs + state.py
 + bootloader server + mock UI buttons + C# coin parameter +
 Razor render-arm + 11 new tests, same day) shipped consecutively.
+
+**MAC-side pivot (in flight 2026-04-29, paused mid-wave-8).**
+Before Wave 8 (TRON + XRP + SOL + XLM), expanding the Recto test
++ deploy surface to the Mac mini host (per operator's `local.md`):
+
+  1. **macOS pytest CI** via a self-hosted GitHub Actions runner
+     on `erikcheatham/Recto` with label `recto`. Unlocks ~17
+     platform-gated tests that skip on Windows: `test_sign_helper`
+     Unix-socket flow (11 tests), `test_joblimit` Linux/macOS
+     Win32-Job-Object guards (3), `test_secrets_credman` /
+     `test_secrets_dpapi_machine` "Windows only" reverse-gates
+     (3), `test_adminui` SO_REUSEADDR semantics (1).
+  2. **iOS device deploy** to a real iPhone via Xcode + Apple
+     Developer Program cert + provisioning profile. Activates
+     the `Platforms/iOS/IosSecureEnclaveKeyService.cs` and
+     `IosApnsPushTokenService.cs` paths that have been written
+     since v0.5+ but never run on real hardware.
+
+`Recto.csproj` already targets `net10.0-ios` with
+`SupportedOSPlatformVersion=15.0`, so iPhone 7 (which caps at
+iOS 15.8.x) deploys without a minimum-OS workaround. Bundle ID
+is `app.recto.phone`; APNs entitlement is wired in
+`Platforms/iOS/Entitlements.plist`. Setup runbook in
+`docs/MAC-SETUP.md`. Workflow YAML in
+`.github/workflows/test-mac.yml`. Both committed in the same
+sprint that pauses Wave 8.
+
+Wave 8 resumes after MAC validates the iOS Recto build deploys
+to Erik's iPhone 7 cleanly. Wave 8 scope unchanged (TRON + XRP
++ SOL + XLM = 4 more coins → 20 of 21 covered).
 
 **Wave 8 / 9 — TRON, XRP, SOL, XLM.** Each is its own curve +
 signature scheme:

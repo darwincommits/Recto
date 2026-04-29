@@ -1,0 +1,67 @@
+# Recto pytest on macOS — self-hosted runner on MAC (10.0.0.162).
+#
+# Unlocks ~17 platform-skipped tests that the Windows-only / Linux-only
+# gates skip on HECATE: test_adminui Linux SO_REUSEADDR, test_joblimit
+# (Linux/macOS Win32 Job Object stub), test_secrets_credman /
+# test_secrets_dpapi_machine "not supported on non-Windows" guards,
+# and the entire test_sign_helper Unix-socket sign-helper path.
+#
+# Mirrors the dual-runner pattern AllThruit + Verso use on DARWIN
+# (one runner per repo; coexist with the AllThruit Reader-App MAUI
+# build runner that already lives on MAC).
+#
+# Setup steps for the runner — see docs/MAC-SETUP.md.
+
+name: Test on macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest on macOS (self-hosted)
+    runs-on: [self-hosted, macOS, ARM64, recto]
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Show environment
+        run: |
+          echo "Runner: $(uname -a)"
+          echo "Python: $(python3 --version)"
+          echo "pwd: $(pwd)"
+
+      - name: Install pytest if missing
+        run: |
+          python3 -m pip install --user --upgrade pytest 2>&1 | tail -5 || true
+          python3 -m pytest --version
+
+      - name: Install Recto in editable mode
+        # Picks up pyproject.toml; brings in any deps Recto declares
+        # (today: pure-stdlib, but keeps us forward-compatible).
+        run: |
+          python3 -m pip install --user -e . 2>&1 | tail -10
+
+      - name: Run full pytest suite
+        run: |
+          python3 -m pytest tests/ -v --tb=short
+
+      - name: Surface skip count for the README badge
+        # Prints the count of skipped tests so CI logs make it obvious
+        # how many platform-gates we're still running into. On macOS
+        # this should be lower than Windows (the macOS-applicable
+        # gates we just unlocked were ~17 of the ~18 Windows skips).
+        if: always()
+        run: |
+          python3 -m pytest tests/ -q 2>&1 | grep -E "passed|skipped|failed" | tail -3

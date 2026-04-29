@@ -426,14 +426,34 @@ class BootloaderHandler(BaseHTTPRequestHandler):
                     "eth_sign approval missing eth_signature_rsv"
                 )
             cleaned = eth_sig[2:] if eth_sig.startswith(("0x", "0X")) else eth_sig
-            if len(cleaned) != 130:
-                self._notify_resolved(req, ok=False, signature_b64u=None,
-                                      eth_signature_rsv=None,
-                                      btc_signature_base64=None,
-                                      reason="eth_signature_rsv wrong length")
-                raise BootloaderError(
-                    f"eth_signature_rsv must be 130 hex chars after optional 0x prefix, got {len(cleaned)}"
-                )
+            # personal_sign + typed_data return a 65-byte r||s||v signature
+            # (130 hex chars). transaction returns the FULL signed raw-tx
+            # bytes (0x02 || rlp([fields..., yParity, r, s])) which varies
+            # in length depending on the access-list size and the byte
+            # widths of the signed integers (typical simple ETH transfer
+            # is ~108-114 bytes / ~216-228 hex chars; an EIP-1559 tx with
+            # accessList entries can be much longer). For transaction we
+            # accept any length above a sane minimum and let the consumer
+            # (RPC node / eth_sendRawTransaction) do the heavy validation.
+            kind = req.eth_message_kind or "personal_sign"
+            if kind == "transaction":
+                if len(cleaned) < 200:
+                    self._notify_resolved(req, ok=False, signature_b64u=None,
+                                          eth_signature_rsv=None,
+                                          btc_signature_base64=None,
+                                          reason="eth_signature_rsv too short for transaction")
+                    raise BootloaderError(
+                        f"eth_signature_rsv for transaction must be at least 200 hex chars (signed-tx is too short to be valid), got {len(cleaned)}"
+                    )
+            else:
+                if len(cleaned) != 130:
+                    self._notify_resolved(req, ok=False, signature_b64u=None,
+                                          eth_signature_rsv=None,
+                                          btc_signature_base64=None,
+                                          reason="eth_signature_rsv wrong length")
+                    raise BootloaderError(
+                        f"eth_signature_rsv for {kind} must be 130 hex chars after optional 0x prefix, got {len(cleaned)}"
+                    )
             try:
                 bytes.fromhex(cleaned)
             except ValueError as exc:

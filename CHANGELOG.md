@@ -7,6 +7,118 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Wave 6: EVM expansion + EIP-712 + EIP-1559 (2026-04-29)
+
+Extends the Ethereum credential kind from "personal_sign on a
+single chain" to the full EVM signing surface across 21 EVM-
+compatible chains, with all three signing verbs wired end-to-end:
+EIP-191 personal_sign (already shipped wave-1), EIP-712 typed-data
+(new), EIP-1559 (type-2) raw-transaction signing (new). One sprint
+unlocks 8 of the user's top-21 cryptocurrencies that share the
+same `m/44'/60'/0'/0/N` BIP-44 tree: ETH (mainnet+L2s), BNB Smart
+Chain, Avalanche C-chain, Polygon, plus every USD-pegged ERC-20
+stablecoin (USDT/USDC/DAI/USD1) and every ERC-20 utility token
+(LINK, HYPE, etc.) — all sign identically through the same
+secp256k1 + Keccak-256 + EIP-191 / EIP-712 / EIP-1559 stack.
+Adding a new EVM-compatible chain after wave-6 is a one-line
+addition to the friendly-label switch in Home.razor; no protocol,
+DTO, or signing-primitive changes.
+
+**Wave 6A — Multi-chain EVM expansion (chain-id labels).**
+`Home.razor`'s `_ethChainLabel` switch extended from 4 chains
+(mainnet / Sepolia / Base / Polygon) to 21 chains: Ethereum
+mainnet, the major L2 rollups (Optimism, Arbitrum One, Base,
+zkSync Era, Linea, Scroll), the major sidechains / alt-L1s (BNB
+Smart Chain, Polygon, Polygon zkEVM, Avalanche C-chain, Gnosis
+Chain, Cronos, Fantom), and the canonical public testnets
+(Ethereum Sepolia + Holesky, Base Sepolia, Arbitrum Sepolia,
+Optimism Sepolia, Polygon Amoy, Avalanche Fuji, BNB testnet).
+Friendly labels show in the operator approval card so the
+operator sees "Base (8453)" instead of "chain 8453" before
+approving — material when an unfamiliar chain id is passed by
+a launcher. The signing math is unchanged across all 21 chains;
+chainId only matters for EIP-1559's RLP payload (replay
+protection lives at the chainId field, not the v byte).
+
+**Wave 6B — EIP-712 typed-data signing.** `recto.ethereum`
+gained `typed_data_hash(td)` plus the EIP-712 internals
+(`_struct_hash`, `_encode_type`, `_find_type_dependencies`,
+`_encode_value`) implementing the canonical
+`keccak256(0x19 || 0x01 || domainSeparator || hashStruct(message))`
+digest with recursive struct dependency resolution and full
+type encoding (uint*, int*, bytes*, address, bool, string,
+nested struct, fixed + dynamic arrays, atomic types). Mirror
+implementation in C# `EthSigningOps.TypedDataHash` parsing the
+same canonical EIP-712 JSON envelope via `System.Text.Json`.
+`MauiEthSignService.SignTypedDataAsync` extends the phone-side
+service: same BIP-39 → BIP-32/BIP-44 derivation chain as
+personal_sign, signs the EIP-712 digest with secp256k1 + RFC
+6979 deterministic-k + low-s + v-recovery, returns 65-byte
+r||s||v with v ∈ {27, 28} (canonical OZ / viem / ethers shape).
+`Home.razor`'s `ApproveEthSignAsync` dispatcher routes
+typed_data through `SignTypedDataAsync`, plus an operator-
+facing summary card shows the EIP-712 primary type, domain
+name + version, and verifyingContract before the operator
+approves — material disclosures for any token-permit or
+DAO-vote signing flow.
+
+**Wave 6C — EIP-1559 (type-2) transaction signing.**
+`recto.ethereum` gained `transaction_hash_eip1559(tx)` plus
+`rlp_encode` / `rlp_decode` implementing the canonical
+`keccak256(0x02 || rlp([chainId, nonce, maxPriorityFeePerGas,
+maxFeePerGas, gasLimit, to, value, data, accessList]))`
+digest. Mirror implementation in C#
+`EthSigningOps.TransactionHashEip1559` + `RlpEncode` parsing
+the same JSON envelope. New `EthSigningOps.SignAndEncodeTransactionEip1559`
+returns the FULL signed raw-tx bytes
+(`0x02 || rlp([fields..., yParity, r, s])`) ready for
+`eth_sendRawTransaction`. `MauiEthSignService.SignTransactionAsync`
+extends the phone-side service: same derivation chain, signs
+with secp256k1 (raw recovery_id 0/1 for yParity, NOT 27+recid
+like personal_sign — chainId already encodes replay protection
+in the RLP payload), returns the full signed-tx hex. Per-
+transaction display arm in `Home.razor` shows recipient
+address (or "Contract creation"), value in ETH (with wei
+fallback), gas limit, max fee per gas in gwei, and a data
+preview before approval. Bootloader `_handle_respond`
+structural validation extended: personal_sign + typed_data
+keep the strict 130-hex-char check (65-byte r||s||v);
+transaction accepts any length ≥ 200 hex chars (sane minimum
+for a non-empty signed-tx body), since the encoded length
+varies with payload size.
+
+**Mock bootloader operator-UI buttons (dev tooling).**
+`/_queue_eth_typed_data` queues a sample EIP-2612 USDC permit
+on Base; `/_queue_eth_transaction` queues a sample EIP-1559
+ETH transfer on Base. Both end-to-end testable from the mock's
+operator UI on Windows MAUI. Mock's response handler extended
+with typed_data + transaction recovery logic — recovers the
+signer address from the rsv (typed_data: re-hashes via
+`typed_data_hash`; transaction: RLP-decodes the signed-tx,
+extracts `[yParity, r, s]` from the tail, re-assembles a
+canonical 27/28 v rsv, recovers via `recover_address` over
+the unsigned `transaction_hash_eip1559`). Operator UI shows
+"recovered: 0x..." inline so each end-to-end test is self-
+verifying without external tooling.
+
+**Coverage unlocked.** 8 of the 21 top-by-market-cap coins
+on Erik's target list now sign through Recto:
+- ETH + L2 family (mainnet, Base, Optimism, Arbitrum, etc.)
+- BNB Smart Chain (BNB)
+- AVAX C-chain (AVAX)
+- USDT (Tether) — ERC-20 on multiple EVM chains
+- USDC (Circle) — ERC-20 on multiple EVM chains
+- DAI (MakerDAO) — ERC-20 on Ethereum
+- LINK (Chainlink) — ERC-20 on Ethereum + L2s
+- HYPE (Hyperliquid) — ERC-20 on Hyperliquid L1
+- USD1 (World Liberty Financial) — ERC-20 on Ethereum + Base
+
+Combined with ETH + BTC already shipped, ~13 of 21 top coins
+covered. Remaining sprint scope: Bitcoin family (LTC, DOGE,
+BCH — wave 7), TRON + XRP (wave 8 / 9), Solana + XLM (wave 10),
+Cardano (wave 11). XMR / ZCASH / CC skipped (privacy-by-
+design + institutional architecture mismatch).
+
 ### Added — Bitcoin credential kind end-to-end (3 waves, 2026-04-29)
 
 Sister implementation of the Ethereum credential kind shipped

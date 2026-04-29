@@ -224,6 +224,139 @@ public sealed class MauiEthSignService : IEthSignService
         }
     }
 
+    public async Task<Result<string>> SignTypedDataAsync(
+        string alias,
+        string derivationPath,
+        string typedDataJson,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(alias))
+        {
+            return Result.Failure<string>(Error.Validation([new ValidationErrors("alias", "Alias is required.")]));
+        }
+        if (string.IsNullOrWhiteSpace(typedDataJson))
+        {
+            return Result.Failure<string>(Error.Validation([new ValidationErrors("typedDataJson", "Typed-data JSON is required.")]));
+        }
+
+        byte[]? seed = null;
+        Bip32.ExtendedKey? leaf = null;
+        try
+        {
+            var mnemonic = await SecureStorage.Default
+                .GetAsync(MnemonicPrefix + alias)
+                .ConfigureAwait(false);
+            if (string.IsNullOrEmpty(mnemonic))
+            {
+                var ensure = await EnsureMnemonicAsync(alias, derivationPath, ct).ConfigureAwait(false);
+                if (ensure.IsFailure)
+                {
+                    return Result.Failure<string>(ensure.Error);
+                }
+                mnemonic = await SecureStorage.Default
+                    .GetAsync(MnemonicPrefix + alias)
+                    .ConfigureAwait(false);
+                if (string.IsNullOrEmpty(mnemonic))
+                {
+                    return Result.Failure<string>(Error.Failure(
+                        "EnsureMnemonicAsync succeeded but no mnemonic was persisted."));
+                }
+            }
+
+            seed = Bip39.MnemonicToSeed(mnemonic, passphrase: string.Empty);
+            leaf = Bip32.DeriveAtPath(seed, derivationPath);
+
+            // EIP-712 produces a 32-byte digest. Sign with the same
+            // secp256k1 + RFC-6979 + low-s primitive used for personal_sign;
+            // the v byte is encoded as 27 + recid (canonical OZ / viem /
+            // ethers shape, NOT raw recid like EIP-1559).
+            var msgHash = EthSigningOps.TypedDataHash(typedDataJson);
+            var rsv = EthSigningOps.SignWithRecovery(msgHash, leaf.PrivateKey);
+            return Result.Success("0x" + Convert.ToHexString(rsv).ToLowerInvariant());
+        }
+        catch (Exception ex)
+        {
+            return Result.Failure<string>(Error.Failure(
+                $"Failed to sign EIP-712 typed-data for '{alias}' at '{derivationPath}': {ex.GetType().Name}: {ex.Message}"));
+        }
+        finally
+        {
+            if (seed is not null) CryptographicOperations.ZeroMemory(seed);
+            if (leaf is not null)
+            {
+                CryptographicOperations.ZeroMemory(leaf.PrivateKey);
+                CryptographicOperations.ZeroMemory(leaf.ChainCode);
+            }
+        }
+    }
+
+    public async Task<Result<string>> SignTransactionAsync(
+        string alias,
+        string derivationPath,
+        string transactionJson,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(alias))
+        {
+            return Result.Failure<string>(Error.Validation([new ValidationErrors("alias", "Alias is required.")]));
+        }
+        if (string.IsNullOrWhiteSpace(transactionJson))
+        {
+            return Result.Failure<string>(Error.Validation([new ValidationErrors("transactionJson", "Transaction JSON is required.")]));
+        }
+
+        byte[]? seed = null;
+        Bip32.ExtendedKey? leaf = null;
+        try
+        {
+            var mnemonic = await SecureStorage.Default
+                .GetAsync(MnemonicPrefix + alias)
+                .ConfigureAwait(false);
+            if (string.IsNullOrEmpty(mnemonic))
+            {
+                var ensure = await EnsureMnemonicAsync(alias, derivationPath, ct).ConfigureAwait(false);
+                if (ensure.IsFailure)
+                {
+                    return Result.Failure<string>(ensure.Error);
+                }
+                mnemonic = await SecureStorage.Default
+                    .GetAsync(MnemonicPrefix + alias)
+                    .ConfigureAwait(false);
+                if (string.IsNullOrEmpty(mnemonic))
+                {
+                    return Result.Failure<string>(Error.Failure(
+                        "EnsureMnemonicAsync succeeded but no mnemonic was persisted."));
+                }
+            }
+
+            seed = Bip39.MnemonicToSeed(mnemonic, passphrase: string.Empty);
+            leaf = Bip32.DeriveAtPath(seed, derivationPath);
+
+            // SignAndEncodeTransactionEip1559 returns the FULL signed
+            // raw-transaction bytes (0x02 || rlp([fields..., yParity, r, s]))
+            // ready to hand to eth_sendRawTransaction. The consumer / smart
+            // contract / RPC node verifies by recovering the signer from
+            // the embedded yParity + r + s and checks chainId matches the
+            // expected chain.
+            var rawSigned = EthSigningOps.SignAndEncodeTransactionEip1559(transactionJson, leaf.PrivateKey);
+            return Result.Success("0x" + Convert.ToHexString(rawSigned).ToLowerInvariant());
+        }
+        catch (Exception ex)
+        {
+            return Result.Failure<string>(Error.Failure(
+                $"Failed to sign EIP-1559 transaction for '{alias}' at '{derivationPath}': {ex.GetType().Name}: {ex.Message}"));
+        }
+        finally
+        {
+            if (seed is not null) CryptographicOperations.ZeroMemory(seed);
+            if (leaf is not null)
+            {
+                CryptographicOperations.ZeroMemory(leaf.PrivateKey);
+                CryptographicOperations.ZeroMemory(leaf.ChainCode);
+            }
+        }
+    }
+
     public Task<Result> ClearAsync(string alias, CancellationToken ct)
     {
         try

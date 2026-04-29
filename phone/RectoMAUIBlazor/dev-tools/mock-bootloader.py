@@ -1425,6 +1425,146 @@ class Handler(BaseHTTPRequestHandler):
             self._send_redirect("/")
             return
 
+        if url.path == "/_queue_eth_typed_data":
+            # v0.5+ ETH typed_data (EIP-712) request. Mints a sample
+            # structured-data payload — an EIP-2612 permit — and queues
+            # it for phone-side signing. The phone derives the secp256k1
+            # key from its BIP39 mnemonic, hashes the typed data per
+            # EIP-712, signs with secp256k1 + RFC-6979 deterministic-k,
+            # and POSTs back r||s||v with v ∈ {27, 28} (canonical
+            # OZ/viem/ethers shape).
+            with STATE._lock:
+                target_phone = STATE.registered[-1] if STATE.registered else None
+            if target_phone is None:
+                self._send_redirect("/")
+                return
+            request_id = str(uuid.uuid4())
+            payload_hash = secrets.token_bytes(32)
+            placeholder_address = "0x" + "00" * 20
+            chain_id = 8453  # Base mainnet
+            # Sample EIP-2612 permit — a common real-world EIP-712 use
+            # case (ERC-20 token approval via off-chain signature). The
+            # specific values are illustrative; cross-wallet compat is
+            # established by the typed-data hash matching what other
+            # wallets compute over the same envelope.
+            deadline = int(time.time()) + 3600
+            owner_addr = "0x" + secrets.token_hex(20)
+            spender_addr = "0x" + secrets.token_hex(20)
+            verifying_contract = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC on mainnet (illustrative)
+            typed_data = {
+                "types": {
+                    "EIP712Domain": [
+                        {"name": "name", "type": "string"},
+                        {"name": "version", "type": "string"},
+                        {"name": "chainId", "type": "uint256"},
+                        {"name": "verifyingContract", "type": "address"},
+                    ],
+                    "Permit": [
+                        {"name": "owner", "type": "address"},
+                        {"name": "spender", "type": "address"},
+                        {"name": "value", "type": "uint256"},
+                        {"name": "nonce", "type": "uint256"},
+                        {"name": "deadline", "type": "uint256"},
+                    ],
+                },
+                "primaryType": "Permit",
+                "domain": {
+                    "name": "USD Coin",
+                    "version": "2",
+                    "chainId": chain_id,
+                    "verifyingContract": verifying_contract,
+                },
+                "message": {
+                    "owner": owner_addr,
+                    "spender": spender_addr,
+                    "value": "1000000000",  # 1000 USDC (6 decimals)
+                    "nonce": "0",
+                    "deadline": str(deadline),
+                },
+            }
+            typed_data_json = json.dumps(typed_data, separators=(",", ":"))
+            with STATE._lock:
+                STATE.pending_requests[request_id] = {
+                    "request_id": request_id,
+                    "kind": "eth_sign",
+                    "service": "demo.recto.example",
+                    "secret": "wallet-permit",
+                    "context": {
+                        "child_pid": secrets.randbelow(60000) + 1000,
+                        "child_argv0": "browser",
+                        "requested_at_unix": int(time.time()),
+                        "operation_description": f"ETH typed_data permit for spender {spender_addr[:10]}...",
+                        "payload_hash_b64u": b64u_encode(payload_hash),
+                        "eth_chain_id": chain_id,
+                        "eth_message_kind": "typed_data",
+                        "eth_address": placeholder_address,
+                        "eth_derivation_path": "m/44'/60'/0'/0/0",
+                        "eth_typed_data_json": typed_data_json,
+                    },
+                    "_phone_id": target_phone["phone_id"],
+                    "_queued_at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                }
+            send_push_wakeup(target_phone, request_id, "eth_sign")
+            self._send_redirect("/")
+            return
+
+        if url.path == "/_queue_eth_transaction":
+            # v0.5+ ETH transaction (EIP-1559 type-2) request. Mints a
+            # sample transfer transaction and queues it for phone-side
+            # signing. The phone derives the secp256k1 key from its
+            # BIP39 mnemonic, computes the EIP-1559 hash
+            # keccak256(0x02 || rlp([chainId, nonce, maxPriority, maxFee,
+            # gas, to, value, data, accessList])), signs with secp256k1
+            # + RFC-6979, and returns the FULL signed raw-transaction
+            # bytes (0x02 || rlp([fields..., yParity, r, s])) ready for
+            # eth_sendRawTransaction.
+            with STATE._lock:
+                target_phone = STATE.registered[-1] if STATE.registered else None
+            if target_phone is None:
+                self._send_redirect("/")
+                return
+            request_id = str(uuid.uuid4())
+            payload_hash = secrets.token_bytes(32)
+            placeholder_address = "0x" + "00" * 20
+            chain_id = 8453  # Base mainnet
+            recipient = "0x" + secrets.token_hex(20)
+            transaction = {
+                "chainId": chain_id,
+                "nonce": 0,
+                "maxPriorityFeePerGas": "1000000",      # 0.001 gwei priority on Base
+                "maxFeePerGas": "10000000",             # 0.01 gwei max
+                "gasLimit": 21000,                      # standard ETH transfer
+                "to": recipient,
+                "value": "100000000000000",             # 0.0001 ETH (1e14 wei)
+                "data": "0x",
+                "accessList": [],
+            }
+            transaction_json = json.dumps(transaction, separators=(",", ":"))
+            with STATE._lock:
+                STATE.pending_requests[request_id] = {
+                    "request_id": request_id,
+                    "kind": "eth_sign",
+                    "service": "demo.recto.example",
+                    "secret": "wallet-transfer",
+                    "context": {
+                        "child_pid": secrets.randbelow(60000) + 1000,
+                        "child_argv0": "browser",
+                        "requested_at_unix": int(time.time()),
+                        "operation_description": f"ETH transfer 0.0001 ETH to {recipient[:10]}... on chain {chain_id}",
+                        "payload_hash_b64u": b64u_encode(payload_hash),
+                        "eth_chain_id": chain_id,
+                        "eth_message_kind": "transaction",
+                        "eth_address": placeholder_address,
+                        "eth_derivation_path": "m/44'/60'/0'/0/0",
+                        "eth_transaction_json": transaction_json,
+                    },
+                    "_phone_id": target_phone["phone_id"],
+                    "_queued_at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                }
+            send_push_wakeup(target_phone, request_id, "eth_sign")
+            self._send_redirect("/")
+            return
+
         if url.path == "/_queue_webauthn_assert":
             # Queue a webauthn_assert request: stand in as the relying party
             # for a fictional web app at https://demo.recto.example. Phone
@@ -1858,11 +1998,22 @@ class Handler(BaseHTTPRequestHandler):
                         if eth_signature_rsv.startswith(("0x", "0X"))
                         else eth_signature_rsv
                     )
-                    if len(rsv_clean) != 130:
-                        self._send_json(400, {
-                            "error": f"eth_signature_rsv must be 130 hex chars after optional 0x prefix, got {len(rsv_clean)}",
-                        })
-                        return
+                    msg_kind_for_len = pending["context"].get("eth_message_kind", "personal_sign")
+                    if msg_kind_for_len == "transaction":
+                        # transaction returns the FULL signed raw-tx bytes
+                        # (0x02 || rlp([fields..., yParity, r, s])) which
+                        # varies in length. Sane minimum: ~200 hex chars.
+                        if len(rsv_clean) < 200:
+                            self._send_json(400, {
+                                "error": f"eth_signature_rsv for transaction must be at least 200 hex chars (signed-tx is too short to be valid), got {len(rsv_clean)}",
+                            })
+                            return
+                    else:
+                        if len(rsv_clean) != 130:
+                            self._send_json(400, {
+                                "error": f"eth_signature_rsv for {msg_kind_for_len} must be 130 hex chars after optional 0x prefix, got {len(rsv_clean)}",
+                            })
+                            return
                     try:
                         bytes.fromhex(rsv_clean)
                     except ValueError as ex:
@@ -1895,6 +2046,7 @@ class Handler(BaseHTTPRequestHandler):
                     # them out of the pending panel before it disappears.
                     extra_response_fields["eth_message_text"] = pending["context"].get("eth_message_text")
                     extra_response_fields["eth_typed_data_json"] = pending["context"].get("eth_typed_data_json")
+                    extra_response_fields["eth_transaction_json"] = pending["context"].get("eth_transaction_json")
                     # Best-effort address recovery — purely informational.
                     # If recto.ethereum is on PYTHONPATH (e.g. mock running
                     # from inside the Recto checkout), recover the signer
@@ -1910,10 +2062,56 @@ class Handler(BaseHTTPRequestHandler):
                         )
 
                         msg_kind = pending["context"].get("eth_message_kind")
+                        digest = None
+                        rsv_for_recovery = eth_signature_rsv
                         if msg_kind == "personal_sign":
                             msg_text = pending["context"].get("eth_message_text", "")
                             digest = personal_sign_hash(msg_text.encode("utf-8"))
-                            recovered = recover_address(digest, eth_signature_rsv)
+                        elif msg_kind == "typed_data":
+                            from recto.ethereum import typed_data_hash
+                            typed_data_json = pending["context"].get("eth_typed_data_json", "")
+                            if typed_data_json:
+                                td = json.loads(typed_data_json)
+                                digest = typed_data_hash(td)
+                        elif msg_kind == "transaction":
+                            # Transaction returns the FULL signed raw-tx
+                            # bytes, not r||s||v. To recover the signer we
+                            # need to (a) re-derive the unsigned hash from
+                            # the queued JSON, and (b) extract r/s/yParity
+                            # from the signed RLP. Cleanest is to recompute
+                            # the hash AND parse the FULL signed-tx via the
+                            # python helper that exists for verification.
+                            from recto.ethereum import transaction_hash_eip1559
+                            tx_json = pending["context"].get("eth_transaction_json", "")
+                            if tx_json:
+                                tx = json.loads(tx_json)
+                                digest = transaction_hash_eip1559(tx)
+                                # Decode the signed raw-tx to extract r||s||v.
+                                # Format: 0x02 || rlp([..., yParity, r, s])
+                                # We pull yParity (last 3rd item), r, s from
+                                # the END of the signed payload by RLP-decoding.
+                                from recto.ethereum import rlp_decode
+                                raw_bytes = bytes.fromhex(rsv_clean)
+                                if raw_bytes[0] != 0x02:
+                                    raise ValueError(f"signed tx must start with 0x02, got 0x{raw_bytes[0]:02x}")
+                                decoded = rlp_decode(raw_bytes[1:])
+                                # decoded is the list with [...payload, yParity, r, s]
+                                y_parity_b = decoded[-3]
+                                r_b = decoded[-2]
+                                s_b = decoded[-1]
+                                # yParity is a 0 or 1 integer (RLP-encoded
+                                # as empty bytes for 0). r and s are 32-byte
+                                # big-endian integers (may have leading zeros
+                                # stripped — left-pad).
+                                y_parity = int.from_bytes(y_parity_b or b"\x00", "big")
+                                r_padded = (b"\x00" * (32 - len(r_b))) + r_b
+                                s_padded = (b"\x00" * (32 - len(s_b))) + s_b
+                                # recover_address expects 27/28 v (canonical)
+                                v_canonical = 27 + y_parity
+                                rsv_assembled = r_padded + s_padded + bytes([v_canonical])
+                                rsv_for_recovery = "0x" + rsv_assembled.hex()
+                        if digest is not None:
+                            recovered = recover_address(digest, rsv_for_recovery)
                             extra_response_fields["eth_recovered_address"] = recovered
                             expected_addr = (pending["context"].get("eth_address") or "").lower()
                             # Suppress the match comparison when the queued
@@ -1931,8 +2129,6 @@ class Handler(BaseHTTPRequestHandler):
                                 extra_response_fields["eth_address_match"] = (
                                     recovered.lower() == expected_addr
                                 )
-                        # typed_data + transaction recovery is a follow-up
-                        # — needs the EIP-712 / RLP hash computed here.
                     except Exception as ex:  # noqa: BLE001
                         extra_response_fields["eth_recovery_error"] = str(ex)
                 elif kind == "btc_sign":
@@ -2454,6 +2650,12 @@ def render_index() -> str:
 <form method="post" action="/_queue_eth_personal_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH personal_sign</button>
 </form>
+<form method="post" action="/_queue_eth_typed_data">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH typed_data (EIP-712)</button>
+</form>
+<form method="post" action="/_queue_eth_transaction">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH transaction (EIP-1559)</button>
+</form>
 <form method="post" action="/_queue_btc_message_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue BTC message_sign</button>
 </form>
@@ -2468,6 +2670,10 @@ def render_index() -> str:
   ETH personal_sign mints an EIP-191 login-style message on Base (chain 8453) and asks the phone
   to sign with a secp256k1 key derived from its BIP39 mnemonic at <code>m/44'/60'/0'/0/0</code>;
   the mock recovers the signer address from the returned r||s||v and surfaces it for inspection.
+  ETH typed_data mints a sample EIP-2612 permit (USDC token approval) on Base and asks the phone
+  to sign per EIP-712; the resulting r||s||v can be plugged into a real <code>permit(...)</code>
+  call. ETH transaction mints a sample EIP-1559 (type-2) ETH transfer on Base and asks the phone
+  to return the FULL signed raw-transaction bytes ready for <code>eth_sendRawTransaction</code>.
   BTC message_sign mints a BIP-137 login-style message on Bitcoin mainnet and asks the phone to
   sign with a secp256k1 key derived from the SAME mnemonic at <code>m/84'/0'/0'/0/0</code>
   (native-SegWit P2WPKH); the mock recovers the bech32 <code>bc1q...</code> address from the

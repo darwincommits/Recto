@@ -92,6 +92,45 @@ public interface IEthSignService
         CancellationToken ct);
 
     /// <summary>
+    /// Signs an EIP-712 typed-data structure with the secp256k1 key
+    /// derived at <paramref name="derivationPath"/>. The
+    /// <paramref name="typedDataJson"/> argument is the canonical
+    /// EIP-712 JSON envelope: <c>{ "types": {...}, "primaryType": "...",
+    /// "domain": {...}, "message": {...} }</c>. Computes the EIP-712
+    /// digest <c>keccak256(0x19 || 0x01 || domainSeparator || hashStruct(message))</c>
+    /// and produces a 65-byte <c>r||s||v</c> signature returned as a
+    /// 0x-prefixed hex string (132 chars total). The <c>v</c> byte
+    /// uses the same canonical 27/28 encoding as personal_sign so any
+    /// EIP-712 verifier (OpenZeppelin, viem, ethers) accepts it.
+    /// </summary>
+    Task<Result<string>> SignTypedDataAsync(
+        string alias,
+        string derivationPath,
+        string typedDataJson,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Signs an EIP-1559 (type-2) transaction with the secp256k1 key
+    /// derived at <paramref name="derivationPath"/>. The
+    /// <paramref name="transactionJson"/> argument is a JSON object
+    /// with the EIP-1559 fields: <c>chainId</c>, <c>nonce</c>,
+    /// <c>maxPriorityFeePerGas</c>, <c>maxFeePerGas</c>, <c>gas</c> /
+    /// <c>gasLimit</c>, <c>to</c>, <c>value</c>, <c>data</c>, optional
+    /// <c>accessList</c>. Computes the transaction hash
+    /// <c>keccak256(0x02 || rlp([chainId, nonce, maxPriorityFeePerGas,
+    /// maxFeePerGas, gasLimit, to, value, data, accessList]))</c> and
+    /// produces the signed raw-transaction bytes returned as a
+    /// 0x-prefixed hex string (the full RLP-encoded
+    /// <c>0x02 || rlp([...all fields..., yParity, r, s])</c>) ready to
+    /// hand to <c>eth_sendRawTransaction</c>.
+    /// </summary>
+    Task<Result<string>> SignTransactionAsync(
+        string alias,
+        string derivationPath,
+        string transactionJson,
+        CancellationToken ct);
+
+    /// <summary>
     /// Removes the mnemonic stored under <paramref name="alias"/>.
     /// Intended for the Settings "Unpair all" emergency wipe and
     /// future per-alias revocation. No-op if absent.

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text;
 using Org.BouncyCastle.Asn1.X9;
 using Org.BouncyCastle.Crypto.Digests;
 using Org.BouncyCastle.Crypto.Parameters;
@@ -304,4 +305,547 @@ public static class EthSigningOps
     }
 
     private static char ToHexChar(int nibble) => (char)(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+
+    // -----------------------------------------------------------------
+    // EIP-712 typed-data hashing
+    // Reference: https://eips.ethereum.org/EIPS/eip-712
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Compute the EIP-712 digest for a typed-data document. Mirrors
+    /// <c>recto.ethereum.typed_data_hash</c> in Python — produces the
+    /// same 32-byte digest given the same JSON input. Cross-language
+    /// interop is verified by tests using the canonical EIP-712 "Mail"
+    /// example from the spec.
+    ///
+    /// Layout:
+    ///   keccak256(0x19 || 0x01 || domainSeparator || structHash(primaryType, message))
+    /// </summary>
+    /// <param name="typedDataJson">
+    /// JSON string with the canonical EIP-712 shape:
+    /// <c>{"types":{...}, "primaryType":"...", "domain":{...}, "message":{...}}</c>.
+    /// </param>
+    /// <returns>32-byte digest the signer signs.</returns>
+    public static byte[] TypedDataHash(string typedDataJson)
+    {
+        if (string.IsNullOrWhiteSpace(typedDataJson))
+            throw new ArgumentException("typedDataJson is required.", nameof(typedDataJson));
+        using var doc = System.Text.Json.JsonDocument.Parse(typedDataJson);
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("types", out var typesElem))
+            throw new ArgumentException("typed_data.types missing", nameof(typedDataJson));
+        if (!root.TryGetProperty("primaryType", out var primaryElem) || primaryElem.ValueKind != System.Text.Json.JsonValueKind.String)
+            throw new ArgumentException("typed_data.primaryType missing", nameof(typedDataJson));
+        if (!root.TryGetProperty("domain", out var domainElem))
+            throw new ArgumentException("typed_data.domain missing", nameof(typedDataJson));
+        if (!root.TryGetProperty("message", out var messageElem))
+            throw new ArgumentException("typed_data.message missing", nameof(typedDataJson));
+        if (!typesElem.TryGetProperty("EIP712Domain", out _))
+            throw new ArgumentException("typed_data.types.EIP712Domain missing", nameof(typedDataJson));
+        var primaryType = primaryElem.GetString()!;
+        if (!typesElem.TryGetProperty(primaryType, out _))
+            throw new ArgumentException($"typed_data.primaryType {primaryType} not present in types", nameof(typedDataJson));
+
+        var domainSeparator = StructHash("EIP712Domain", domainElem, typesElem);
+        var structHash = StructHash(primaryType, messageElem, typesElem);
+        var combined = new byte[2 + 32 + 32];
+        combined[0] = 0x19;
+        combined[1] = 0x01;
+        Buffer.BlockCopy(domainSeparator, 0, combined, 2, 32);
+        Buffer.BlockCopy(structHash, 0, combined, 34, 32);
+        return Keccak256(combined);
+    }
+
+    private static byte[] StructHash(string structName, System.Text.Json.JsonElement value, System.Text.Json.JsonElement types)
+    {
+        var typeHash = Keccak256(System.Text.Encoding.UTF8.GetBytes(EncodeType(structName, types)));
+        if (!types.TryGetProperty(structName, out var fields))
+            throw new InvalidOperationException($"Type {structName} not in types schema.");
+        using var stream = new System.IO.MemoryStream();
+        stream.Write(typeHash, 0, typeHash.Length);
+        foreach (var field in fields.EnumerateArray())
+        {
+            var fieldName = field.GetProperty("name").GetString()!;
+            var fieldType = field.GetProperty("type").GetString()!;
+            if (!value.TryGetProperty(fieldName, out var fieldValue))
+                throw new InvalidOperationException($"struct {structName} field {fieldName} missing from value");
+            var encoded = EncodeValue(fieldType, fieldValue, types);
+            stream.Write(encoded, 0, encoded.Length);
+        }
+        return Keccak256(stream.ToArray());
+    }
+
+    private static string EncodeType(string primaryType, System.Text.Json.JsonElement types)
+    {
+        var deps = new System.Collections.Generic.SortedSet<string>(StringComparer.Ordinal);
+        FindTypeDependencies(primaryType, types, deps);
+        deps.Remove(primaryType);
+        var ordered = new System.Collections.Generic.List<string> { primaryType };
+        ordered.AddRange(deps);
+        var sb = new StringBuilder();
+        foreach (var dep in ordered)
+        {
+            if (!types.TryGetProperty(dep, out var fields))
+                throw new InvalidOperationException($"type {dep} referenced from {primaryType} not present in types");
+            sb.Append(dep);
+            sb.Append('(');
+            bool first = true;
+            foreach (var f in fields.EnumerateArray())
+            {
+                if (!first) sb.Append(',');
+                sb.Append(f.GetProperty("type").GetString());
+                sb.Append(' ');
+                sb.Append(f.GetProperty("name").GetString());
+                first = false;
+            }
+            sb.Append(')');
+        }
+        return sb.ToString();
+    }
+
+    private static void FindTypeDependencies(string primaryType, System.Text.Json.JsonElement types, System.Collections.Generic.SortedSet<string> found)
+    {
+        var bracketIdx = primaryType.IndexOf('[');
+        var baseType = bracketIdx < 0 ? primaryType : primaryType[..bracketIdx];
+        if (found.Contains(baseType)) return;
+        if (!types.TryGetProperty(baseType, out var fields)) return; // atomic, not a dep
+        found.Add(baseType);
+        foreach (var f in fields.EnumerateArray())
+        {
+            FindTypeDependencies(f.GetProperty("type").GetString()!, types, found);
+        }
+    }
+
+    private static byte[] EncodeValue(string fieldType, System.Text.Json.JsonElement value, System.Text.Json.JsonElement types)
+    {
+        // Array types T[] or T[N]
+        if (fieldType.EndsWith(']'))
+        {
+            var bracketIdx = fieldType.LastIndexOf('[');
+            var innerType = fieldType[..bracketIdx];
+            if (value.ValueKind != System.Text.Json.JsonValueKind.Array)
+                throw new InvalidOperationException($"array field of type {fieldType} requires array value");
+            using var stream = new System.IO.MemoryStream();
+            foreach (var item in value.EnumerateArray())
+            {
+                var enc = EncodeValue(innerType, item, types);
+                stream.Write(enc, 0, enc.Length);
+            }
+            return Keccak256(stream.ToArray());
+        }
+        // Struct type
+        if (types.TryGetProperty(fieldType, out _))
+        {
+            return StructHash(fieldType, value, types);
+        }
+        // Atomic types
+        if (fieldType == "string")
+        {
+            var s = value.GetString() ?? throw new InvalidOperationException("string field requires string value");
+            return Keccak256(System.Text.Encoding.UTF8.GetBytes(s));
+        }
+        if (fieldType == "bytes")
+        {
+            return Keccak256(HexOrBytesToBytes(value));
+        }
+        if (fieldType.StartsWith("bytes"))
+        {
+            // bytes1..bytes32 fixed-length, right-padded to 32 bytes
+            var n = int.Parse(fieldType[5..]);
+            if (n < 1 || n > 32) throw new InvalidOperationException($"bytes{n} out of range 1..32");
+            var raw = HexOrBytesToBytes(value);
+            if (raw.Length > n) throw new InvalidOperationException($"bytes{n} value too long: {raw.Length} bytes");
+            var padded = new byte[32];
+            Buffer.BlockCopy(raw, 0, padded, 0, raw.Length);
+            return padded;
+        }
+        if (fieldType == "address")
+        {
+            var s = value.GetString() ?? throw new InvalidOperationException("address field requires hex string");
+            var cleaned = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+            if (cleaned.Length != 40) throw new InvalidOperationException($"address must be 40 hex chars after 0x prefix, got {cleaned.Length}");
+            var addrBytes = Convert.FromHexString(cleaned);
+            var padded = new byte[32];
+            Buffer.BlockCopy(addrBytes, 0, padded, 12, 20);
+            return padded;
+        }
+        if (fieldType == "bool")
+        {
+            var b = value.GetBoolean();
+            var padded = new byte[32];
+            padded[31] = (byte)(b ? 1 : 0);
+            return padded;
+        }
+        if (fieldType.StartsWith("uint") || fieldType.StartsWith("int"))
+        {
+            var isSigned = fieldType.StartsWith("int");
+            var bitsStr = isSigned ? fieldType[3..] : fieldType[4..];
+            var bits = string.IsNullOrEmpty(bitsStr) ? 256 : int.Parse(bitsStr);
+            if (bits < 8 || bits > 256 || bits % 8 != 0)
+                throw new InvalidOperationException($"unsupported integer type {fieldType}");
+            BigInteger n;
+            if (value.ValueKind == System.Text.Json.JsonValueKind.Number)
+            {
+                n = new BigInteger(value.GetInt64().ToString());
+            }
+            else
+            {
+                var s = value.GetString()!;
+                if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                {
+                    n = new BigInteger(s[2..], 16);
+                }
+                else
+                {
+                    n = new BigInteger(s);
+                }
+            }
+            if (isSigned && n.SignValue < 0)
+            {
+                // Two's complement to 256 bits
+                var twoTo256 = BigInteger.One.ShiftLeft(256);
+                n = twoTo256.Add(n);
+            }
+            else if (!isSigned && n.SignValue < 0)
+            {
+                throw new InvalidOperationException($"uint{bits} cannot be negative");
+            }
+            return UnsignedFixed32(n);
+        }
+        throw new InvalidOperationException($"unsupported EIP-712 type {fieldType}");
+    }
+
+    private static byte[] HexOrBytesToBytes(System.Text.Json.JsonElement value)
+    {
+        var s = value.GetString() ?? throw new InvalidOperationException("bytes field requires hex string");
+        var cleaned = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+        return cleaned.Length == 0 ? Array.Empty<byte>() : Convert.FromHexString(cleaned);
+    }
+
+    // -----------------------------------------------------------------
+    // RLP encoding (used by EIP-1559 transaction hashing below)
+    // Reference: https://eth.wiki/fundamentals/rlp
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// RLP-encode a structured value. Items can be byte arrays, ints
+    /// (non-negative), or lists of items. Mirrors
+    /// <c>recto.ethereum.rlp_encode</c> in Python.
+    /// </summary>
+    public static byte[] RlpEncode(object item)
+    {
+        if (item is byte[] bytes)
+            return RlpEncodeString(bytes);
+        if (item is int i)
+            return RlpEncodeInteger(new BigInteger(i.ToString()));
+        if (item is long l)
+            return RlpEncodeInteger(new BigInteger(l.ToString()));
+        if (item is BigInteger bi)
+            return RlpEncodeInteger(bi);
+        if (item is string s)
+            return RlpEncodeString(System.Text.Encoding.UTF8.GetBytes(s));
+        if (item is System.Collections.IList list)
+        {
+            using var stream = new System.IO.MemoryStream();
+            foreach (var x in list)
+            {
+                var enc = RlpEncode(x!);
+                stream.Write(enc, 0, enc.Length);
+            }
+            var encoded = stream.ToArray();
+            var lenPrefix = RlpEncodeLength(encoded.Length, 0xC0);
+            var result = new byte[lenPrefix.Length + encoded.Length];
+            Buffer.BlockCopy(lenPrefix, 0, result, 0, lenPrefix.Length);
+            Buffer.BlockCopy(encoded, 0, result, lenPrefix.Length, encoded.Length);
+            return result;
+        }
+        throw new InvalidOperationException($"RLP cannot encode {item?.GetType().Name ?? "null"}");
+    }
+
+    private static byte[] RlpEncodeInteger(BigInteger value)
+    {
+        if (value.SignValue < 0) throw new InvalidOperationException("RLP cannot encode negative int");
+        if (value.SignValue == 0) return RlpEncodeString(Array.Empty<byte>());
+        return RlpEncodeString(value.ToByteArrayUnsigned());
+    }
+
+    private static byte[] RlpEncodeString(byte[] data)
+    {
+        if (data.Length == 1 && data[0] < 0x80) return data;
+        var lenPrefix = RlpEncodeLength(data.Length, 0x80);
+        var result = new byte[lenPrefix.Length + data.Length];
+        Buffer.BlockCopy(lenPrefix, 0, result, 0, lenPrefix.Length);
+        Buffer.BlockCopy(data, 0, result, lenPrefix.Length, data.Length);
+        return result;
+    }
+
+    private static byte[] RlpEncodeLength(int length, int offset)
+    {
+        if (length < 56) return new[] { (byte)(offset + length) };
+        // length-of-length encoding
+        var lenBytes = new BigInteger(length.ToString()).ToByteArrayUnsigned();
+        var result = new byte[1 + lenBytes.Length];
+        result[0] = (byte)(offset + 55 + lenBytes.Length);
+        Buffer.BlockCopy(lenBytes, 0, result, 1, lenBytes.Length);
+        return result;
+    }
+
+    // -----------------------------------------------------------------
+    // EIP-1559 transaction hashing (type 0x02)
+    // Reference: https://eips.ethereum.org/EIPS/eip-1559
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Compute the keccak256 digest of an EIP-1559 (type 0x02)
+    /// transaction for signing. Mirrors
+    /// <c>recto.ethereum.transaction_hash_eip1559</c> in Python.
+    ///
+    /// Encoding: <c>0x02 || rlp([chain_id, nonce, max_priority_fee_per_gas,
+    /// max_fee_per_gas, gas_limit, to, value, data, access_list])</c>
+    ///
+    /// The signer signs this digest with secp256k1 ECDSA + RFC 6979
+    /// deterministic-k. The signature uses raw recovery_id (0 or 1)
+    /// for v, NOT 27+recid like the legacy/EIP-191 forms.
+    /// </summary>
+    public static byte[] TransactionHashEip1559(string txJson)
+    {
+        if (string.IsNullOrWhiteSpace(txJson))
+            throw new ArgumentException("txJson is required.", nameof(txJson));
+        using var doc = System.Text.Json.JsonDocument.Parse(txJson);
+        var tx = doc.RootElement;
+
+        var chainId = ReadIntField(tx, "chainId", required: true)!;
+        var nonce = ReadIntField(tx, "nonce", required: true)!;
+        var maxPriority = ReadIntField(tx, "maxPriorityFeePerGas", required: true)!;
+        var maxFee = ReadIntField(tx, "maxFeePerGas", required: true)!;
+        var gas = ReadIntField(tx, "gas", required: false) ?? ReadIntField(tx, "gasLimit", required: true)!;
+        var value = ReadIntField(tx, "value", required: false) ?? BigInteger.Zero;
+
+        byte[] toBytes;
+        if (tx.TryGetProperty("to", out var toElem) && toElem.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(toElem.GetString()))
+        {
+            var s = toElem.GetString()!;
+            var cleaned = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+            if (cleaned.Length != 40) throw new InvalidOperationException($"transaction.to must be 40 hex chars, got {cleaned.Length}");
+            toBytes = Convert.FromHexString(cleaned);
+        }
+        else
+        {
+            toBytes = Array.Empty<byte>(); // contract creation
+        }
+
+        byte[] dataBytes;
+        if (tx.TryGetProperty("data", out var dataElem) && dataElem.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            var s = dataElem.GetString() ?? "";
+            var cleaned = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+            dataBytes = cleaned.Length == 0 ? Array.Empty<byte>() : Convert.FromHexString(cleaned);
+        }
+        else
+        {
+            dataBytes = Array.Empty<byte>();
+        }
+
+        // Access list — list of [address_bytes, [storage_key_bytes, ...]] entries
+        var accessList = new System.Collections.Generic.List<object>();
+        if (tx.TryGetProperty("accessList", out var aclElem) && aclElem.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var entry in aclElem.EnumerateArray())
+            {
+                string addrStr;
+                System.Text.Json.JsonElement keysArr;
+                if (entry.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    addrStr = entry.GetProperty("address").GetString() ?? "";
+                    keysArr = entry.GetProperty("storageKeys");
+                }
+                else if (entry.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var arr = entry.EnumerateArray().ToArray();
+                    addrStr = arr[0].GetString() ?? "";
+                    keysArr = arr[1];
+                }
+                else
+                {
+                    throw new InvalidOperationException("accessList entry must be object or array");
+                }
+                var addrCleaned = addrStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? addrStr[2..] : addrStr;
+                if (addrCleaned.Length != 40) throw new InvalidOperationException("accessList address must be 40 hex chars");
+                var addrBytes = Convert.FromHexString(addrCleaned);
+                var storageList = new System.Collections.Generic.List<object>();
+                foreach (var key in keysArr.EnumerateArray())
+                {
+                    var k = key.GetString()!;
+                    var kc = k.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? k[2..] : k;
+                    if (kc.Length != 64) throw new InvalidOperationException("accessList storage key must be 64 hex chars");
+                    storageList.Add(Convert.FromHexString(kc));
+                }
+                accessList.Add(new object[] { addrBytes, storageList });
+            }
+        }
+
+        var payload = new System.Collections.Generic.List<object>
+        {
+            chainId, nonce, maxPriority, maxFee, gas, toBytes, value, dataBytes, accessList,
+        };
+        var rlpBytes = RlpEncode(payload);
+        var encoded = new byte[1 + rlpBytes.Length];
+        encoded[0] = 0x02;
+        Buffer.BlockCopy(rlpBytes, 0, encoded, 1, rlpBytes.Length);
+        return Keccak256(encoded);
+    }
+
+    private static BigInteger? ReadIntField(System.Text.Json.JsonElement obj, string name, bool required)
+    {
+        if (!obj.TryGetProperty(name, out var elem) || elem.ValueKind == System.Text.Json.JsonValueKind.Null)
+        {
+            if (required) throw new InvalidOperationException($"transaction.{name} is required");
+            return null;
+        }
+        if (elem.ValueKind == System.Text.Json.JsonValueKind.Number)
+        {
+            return new BigInteger(elem.GetInt64().ToString());
+        }
+        if (elem.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            var s = elem.GetString()!;
+            if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                return new BigInteger(s[2..], 16);
+            return new BigInteger(s);
+        }
+        throw new InvalidOperationException($"transaction.{name} must be number or string");
+    }
+
+    /// <summary>
+    /// Sign an EIP-1559 transaction hash with secp256k1 ECDSA. The
+    /// returned 65-byte r||s||v uses raw recovery_id (0 or 1) for v,
+    /// per EIP-1559 — NOT 27+recid like personal_sign / EIP-712.
+    /// EIP-155 chain-id replay protection is already baked into the
+    /// hash itself (chainId is the first RLP field), so v doesn't
+    /// need to encode it separately.
+    /// </summary>
+    public static byte[] SignTransactionEip1559(byte[] msgHash, byte[] privateKey)
+    {
+        // Reuse the same secp256k1 signing primitive but rewrite the
+        // v byte to raw recovery_id at the end.
+        var rsv = SignWithRecovery(msgHash, privateKey);
+        if (rsv[64] >= 27) rsv[64] = (byte)(rsv[64] - 27);
+        return rsv;
+    }
+
+    /// <summary>
+    /// Build the full signed raw transaction bytes for an EIP-1559
+    /// (type-2) transaction. Parses the JSON, computes the hash,
+    /// signs, and appends [yParity, r, s] to the RLP payload, returning
+    /// the complete <c>0x02 || rlp([..., yParity, r, s])</c> bytes
+    /// ready to hand to <c>eth_sendRawTransaction</c>.
+    /// </summary>
+    public static byte[] SignAndEncodeTransactionEip1559(string txJson, byte[] privateKey)
+    {
+        if (string.IsNullOrWhiteSpace(txJson))
+            throw new ArgumentException("txJson is required.", nameof(txJson));
+        using var doc = System.Text.Json.JsonDocument.Parse(txJson);
+        var tx = doc.RootElement;
+
+        var chainId = ReadIntField(tx, "chainId", required: true)!;
+        var nonce = ReadIntField(tx, "nonce", required: true)!;
+        var maxPriority = ReadIntField(tx, "maxPriorityFeePerGas", required: true)!;
+        var maxFee = ReadIntField(tx, "maxFeePerGas", required: true)!;
+        var gas = ReadIntField(tx, "gas", required: false) ?? ReadIntField(tx, "gasLimit", required: true)!;
+        var value = ReadIntField(tx, "value", required: false) ?? BigInteger.Zero;
+
+        byte[] toBytes;
+        if (tx.TryGetProperty("to", out var toElem) && toElem.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(toElem.GetString()))
+        {
+            var s = toElem.GetString()!;
+            var cleaned = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+            if (cleaned.Length != 40) throw new InvalidOperationException($"transaction.to must be 40 hex chars, got {cleaned.Length}");
+            toBytes = Convert.FromHexString(cleaned);
+        }
+        else
+        {
+            toBytes = Array.Empty<byte>();
+        }
+
+        byte[] dataBytes;
+        if (tx.TryGetProperty("data", out var dataElem) && dataElem.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            var s = dataElem.GetString() ?? "";
+            var cleaned = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+            dataBytes = cleaned.Length == 0 ? Array.Empty<byte>() : Convert.FromHexString(cleaned);
+        }
+        else
+        {
+            dataBytes = Array.Empty<byte>();
+        }
+
+        var accessList = new System.Collections.Generic.List<object>();
+        if (tx.TryGetProperty("accessList", out var aclElem) && aclElem.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var entry in aclElem.EnumerateArray())
+            {
+                string addrStr;
+                System.Text.Json.JsonElement keysArr;
+                if (entry.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    addrStr = entry.GetProperty("address").GetString() ?? "";
+                    keysArr = entry.GetProperty("storageKeys");
+                }
+                else if (entry.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var arr = entry.EnumerateArray().ToArray();
+                    addrStr = arr[0].GetString() ?? "";
+                    keysArr = arr[1];
+                }
+                else
+                {
+                    throw new InvalidOperationException("accessList entry must be object or array");
+                }
+                var addrCleaned = addrStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? addrStr[2..] : addrStr;
+                if (addrCleaned.Length != 40) throw new InvalidOperationException("accessList address must be 40 hex chars");
+                var addrBytes = Convert.FromHexString(addrCleaned);
+                var storageList = new System.Collections.Generic.List<object>();
+                foreach (var key in keysArr.EnumerateArray())
+                {
+                    var k = key.GetString()!;
+                    var kc = k.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? k[2..] : k;
+                    if (kc.Length != 64) throw new InvalidOperationException("accessList storage key must be 64 hex chars");
+                    storageList.Add(Convert.FromHexString(kc));
+                }
+                accessList.Add(new object[] { addrBytes, storageList });
+            }
+        }
+
+        var payload = new System.Collections.Generic.List<object>
+        {
+            chainId, nonce, maxPriority, maxFee, gas, toBytes, value, dataBytes, accessList,
+        };
+        var rlpPayload = RlpEncode(payload);
+        var hashInput = new byte[1 + rlpPayload.Length];
+        hashInput[0] = 0x02;
+        Buffer.BlockCopy(rlpPayload, 0, hashInput, 1, rlpPayload.Length);
+        var hash = Keccak256(hashInput);
+
+        // Sign with raw recovery_id (0 or 1) for EIP-1559's yParity.
+        var rsv = SignTransactionEip1559(hash, privateKey);
+        var sigR = new byte[32]; Buffer.BlockCopy(rsv, 0, sigR, 0, 32);
+        var sigS = new byte[32]; Buffer.BlockCopy(rsv, 32, sigS, 0, 32);
+        int yParity = rsv[64];
+
+        // Strip leading zero bytes from r and s for canonical RLP integer
+        // encoding. r/s are produced as fixed-width 32-byte arrays from
+        // SignWithRecovery, but RLP integers are big-endian with no
+        // leading-zero padding.
+        var payloadWithSig = new System.Collections.Generic.List<object>(payload)
+        {
+            new BigInteger(yParity.ToString()),
+            new BigInteger(1, sigR),
+            new BigInteger(1, sigS),
+        };
+        var rlpFinal = RlpEncode(payloadWithSig);
+        var signedRaw = new byte[1 + rlpFinal.Length];
+        signedRaw[0] = 0x02;
+        Buffer.BlockCopy(rlpFinal, 0, signedRaw, 1, rlpFinal.Length);
+        return signedRaw;
+    }
 }

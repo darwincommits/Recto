@@ -41,6 +41,41 @@ during the Tier-1 v1-readiness sprint).
 
 ## Phone-app gotchas (MAUI / iOS / Android)
 
+### C# / .NET specifics
+
+- **`Org.BouncyCastle.Math.BigInteger` is a CLASS, not a struct —
+  `BigInteger?` is nullable reference, not `Nullable<BigInteger>`,
+  so there's NO `.Value` property.** When NRT is enabled (which it
+  is in `Recto.Shared.csproj`), the `?` annotation on a reference
+  type just means "may be null." The `!.Value` pattern that works
+  for `int?` / `long?` / `System.Numerics.BigInteger?` does NOT
+  compile against BC's BigInteger — error is
+  `CS1061 'BigInteger' does not contain a definition for 'Value'`.
+  Use `!` alone to assert non-null:
+  `var x = SomeBcMethod()!;` not `var x = SomeBcMethod()!.Value;`.
+  Caught wave-6 (2026-04-29) when the EIP-1559 transaction-hash
+  helper (originally written as if `BigInteger?` were a value
+  type) failed to compile on first build — 11 cascade errors
+  across `TransactionHashEip1559` + `SignAndEncodeTransactionEip1559`.
+  When importing patterns from System.Numerics-using code
+  (`https://github.com/.../System.Numerics.BigInteger`) into a
+  BC-using file, audit every `.Value` access; they need to drop.
+
+- **C# forbids method-local variable shadowing across non-overlapping
+  child scopes — even when the outer declaration appears AFTER the
+  child block in source order.** Means: if you have `if (x) { var s = "..."; }`
+  early in a method and later in the same method declare
+  `var s = new byte[32]`, the compiler errors at the `if` block:
+  `CS0136 A local or parameter named 's' cannot be declared in this
+  scope because that name is used in an enclosing local scope`.
+  The fix is to rename one of the two — typically the outer
+  method-local, since the inner-block name is the local idiom.
+  Caught wave-6 when EIP-1559 sign-and-encode added
+  `var r = new byte[32]; var s = new byte[32];` for signature
+  components in a method whose JSON-parsing if-blocks were already
+  using `var s = elem.GetString()`. Renamed signature components
+  to `sigR` / `sigS` to keep the JSON-parsing idiom local-scope-clean.
+
 ### Build and deploy
 
 - **VS Hot Reload / incremental builds silently fail to redeploy

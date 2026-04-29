@@ -90,26 +90,41 @@ in the operator's private memo.
     push logic, then hands the operator a 3-line execution block:
     ```
     cd <repo root>
-    .\git_push.ps1 -DarwinName "<persona name>" -DarwinEmail "<persona email>"
+    .\git_push.ps1
     Remove-Item .\git_push.ps1
     ```
     The script is created fresh each commit, encodes everything specific
     to that sprint (which files to stage, which leftovers to delete, the
-    multi-paragraph commit message), takes the operator's persona identity
-    as parameters (so the operator's `%USERPROFILE%\private\local.md`
-    private memo is the only place that holds the actual name + email),
-    and is deleted by the operator immediately after the push completes.
-    Rationale: (a) PowerShell quoting hell is hostile to multi-paragraph
-    commit messages embedded in a chat-pasted command; (b) the script can
-    fail-fast on individual git steps with `$LASTEXITCODE` checks rather
-    than barreling forward when `git add` already failed; (c) the chat-
-    autolinking gotcha that converts `<word>.<py|md>` filenames into
-    pseudo-markdown links has burned us before — staging a long file list
-    in chat is exactly the surface that bites; (d) self-deletion after
-    push means the script never lives in repo history, so each one is an
-    AI-generated artifact specific to one session that doesn't accumulate.
-    The operator may rename the script to `gitscript.ps1` if they prefer;
-    `git_push.ps1` is the conventional default.
+    multi-paragraph commit message), and is deleted by the operator
+    immediately after the push completes. Rationale: (a) PowerShell
+    quoting hell is hostile to multi-paragraph commit messages embedded
+    in a chat-pasted command; (b) the script can fail-fast on individual
+    git steps with `$LASTEXITCODE` checks rather than barreling forward
+    when `git add` already failed; (c) the chat-autolinking gotcha that
+    converts `<word>.<py|md>` filenames into pseudo-markdown links has
+    burned us before — staging a long file list in chat is exactly the
+    surface that bites; (d) self-deletion after push means the script
+    never lives in repo history, so each one is an AI-generated artifact
+    specific to one session that doesn't accumulate. The operator may
+    rename the script to `gitscript.ps1` if they prefer; `git_push.ps1`
+    is the conventional default.
+
+    **Persona identity defaults to `darwincommits` /
+    `darwinsemailinbox@gmail.com` baked into the script.** The Darwin
+    persona is the standing identity for AI-authored commits across
+    every Erik-owned repo (Recto, AllThruit, Verso, AllThruitCoin); each
+    `git_push.ps1` declares them as `param([string]$DarwinName  =
+    "darwincommits", [string]$DarwinEmail = "darwinsemailinbox@gmail.com")`
+    so the operator can run `.\git_push.ps1` with zero arguments and the
+    OS-level Git Credential Manager popup confirming the
+    darwincommits-account push is the only operator interaction
+    required. NEVER make the parameters Mandatory and NEVER ask the
+    operator to paste the email value into chat — that's friction the
+    operator has already burned a sprint on (2026-04-29). Override-by-
+    parameter still works if a future commit ever needs a different
+    identity, but the default-zero-args path is the documented norm.
+    The placeholder-detection sanity check at the top of every script
+    stays in place as a defense against accidental clobber.
 
 ## Repo layout (matches what's on disk)
 
@@ -378,42 +393,74 @@ read that file in addition to this one.
   passing through `.env` or `AppEnvironmentExtra`; that's the
   expected default for any new secret going forward.
 
-## Active sprint — none (cryptocurrency-custody story complete)
+## Active sprint — Top-21 cryptocurrency expansion (in flight 2026-04-29)
 
-Both Ethereum (2026-04-28) and Bitcoin (2026-04-29) credential
-kinds shipped end-to-end. The Recto vault now holds one BIP-39
-mnemonic that derives both an Ethereum address tree
-(<c>m/44'/60'/0'/0/N</c>) and a Bitcoin native-SegWit P2WPKH
-address tree (<c>m/84'/0'/0'/0/N</c>) — together covering ~80%
-of by-market-cap on-chain custody surface. Cross-wallet
-interop confirmed for ETH live (MyCrypto + Python verifier);
-BTC interop pending Erik's first end-to-end smoke test from
-Windows. Reference vectors pinned in tests for both:
-"abandon...about" → 0x9858EfFD... (ETH) and
-bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu (BTC).
+Goal: maximize coin throughput per sprint window. Erik's target
+list is 21 coins; XMR / ZCASH / CC explicitly skipped (privacy-by-
+design or institutional-architecture mismatch with Recto's
+self-custody model). Wave-by-wave plan ordered by leverage:
+chains that share infrastructure unlock multiple coins per wave.
 
-**Next directions** — pick what's most valuable when you're ready
-to push forward:
-- **PSBT (BIP-174) signing** — Bitcoin transaction signing.
-  ~400 LOC; closes the "send Bitcoin from Recto" loop.
-- **EIP-712 typed-data + RLP transaction signing** — same shape
-  for Ethereum. Login-with-Ethereum + actually-send-ETH paths.
-- **Mnemonic export ceremony** — biometric-gated one-time-display
-  UI so operators can back up the 24 words. Today the mnemonic
-  is generated but never shown; loss of the phone = loss of all
-  addresses.
-- **Mnemonic import ceremony** — paste an existing mnemonic
-  (e.g. from a Ledger recovery phrase) and have Recto re-derive.
-- **Multi-account picker** — Settings page listing every address
-  derived so far, with an "Add account" button that bumps the
-  BIP-44 account index.
+**Wave 6 — EVM expansion + EIP-712 + EIP-1559 (SHIPPED 2026-04-29).**
+Single highest-leverage move: extends `m/44'/60'` BIP-44 tree to
+21 EVM-compatible chains (mainnet + 6 L2s + 7 sidechains/alt-L1s
++ 7 testnets) with all three signing verbs wired end-to-end —
+EIP-191 personal_sign (already shipped), EIP-712 typed_data (new),
+EIP-1559 (type-2) transaction (new). Unlocks 8 of 21 target coins
+in one wave: ETH (mainnet+L2s), BNB Smart Chain, AVAX C-chain,
+USDT, USDC, DAI, LINK, HYPE, USD1. Combined with ETH + BTC
+already shipped, ~13 of 21 covered. See CHANGELOG entry for the
+detailed primitive list (typed_data_hash, transaction_hash_eip1559,
+RLP, SignAndEncodeTransactionEip1559, mock-bootloader recovery).
+
+**Wave 7 — Bitcoin family (LTC + DOGE + BCH) — NEXT.**
+Same shape as BTC. Different coin types in BIP-44 (`m/44'/2'`
+LTC, `m/44'/3'` DOGE, `m/44'/145'` BCH) and different bech32
+HRPs / address-version bytes. Can probably ship LTC + DOGE + BCH
+in one wave by parameterizing `MauiBtcSignService` over the
+network-config table; net-new code is ~50-100 LOC of constants
++ HRP-switch in bech32 encode path.
+
+**Wave 8 / 9 — TRON, XRP, SOL, XLM.** Each is its own curve +
+signature scheme:
+- TRON: secp256k1 + Keccak-256 + base58 address (close cousin of
+  ETH; can share SignWithRecovery primitive).
+- XRP: ed25519 OR secp256k1 (XRP supports both; ed25519 reuses
+  our existing Ed25519 envelope code, secp256k1 reuses the ETH
+  primitive).
+- SOL: ed25519 + base58 address; reuses the IEnclaveKeyService
+  Ed25519 primitive directly.
+- XLM: ed25519 + base32 address; reuses Ed25519 primitive.
+
+**Wave 10 — Cardano (ADA).** ed25519 with custom derivation
+(BIP-44 + Cardano's own SLIP-23 / CIP-1852 hardened-key tweak).
+Deferred to its own wave; the derivation path is non-standard
+enough that a reusable primitive doesn't fall out of the
+existing Bip32 work.
+
+**Skipped:** XMR (privacy-by-design — view keys + ring sigs
+require a different architectural posture); ZCASH (zk-SNARK
+proving requires multi-second compute on shielded transfers,
+mismatch with phone-tap-approve flow); CC = Canton (#16 by mcap;
+institutional permissioned-ledger architecture, not self-
+custody). Reserved for a future "exotic chains" sprint if
+demand emerges.
+
+**Cross-wave priorities (deferred until coin coverage hits 80%+):**
 - **Capability-JWT scope semantics** for agent signing —
   AllThruitCoin Phase 5 unlock; the path that lets agent-script
   features sign on-chain on behalf of operators within scoped
   caps.
+- **Mnemonic export ceremony** — biometric-gated one-time-display
+  UI so operators can back up the 24 words.
+- **Mnemonic import ceremony** — paste an existing mnemonic
+  (e.g. from a Ledger recovery phrase).
+- **Multi-account picker** — Settings page listing every address
+  derived so far.
+- **PSBT (BIP-174) signing** — Bitcoin transaction signing.
 - **Real-iPhone deploy validation** — software impl is
-  cross-platform, just needs deploy-and-confirm. Gated on
-  Apple-platform build host availability + Xcode DeviceSupport.
+  cross-platform; gated on Apple-platform build host
+  availability + Xcode DeviceSupport.
 
 ---
 

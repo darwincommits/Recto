@@ -299,9 +299,70 @@
                                             }
                                             else if (req.Context.EthMessageKind == EthMessageKind.TypedData && !string.IsNullOrEmpty(req.Context.EthTypedDataJson))
                                             {
-                                                <p class="mb-2 text-muted small" style="white-space: pre-wrap; word-break: break-word;">
-                                                    <strong>Typed data:</strong> <code>@TruncateHash(req.Context.EthTypedDataJson)</code>
+                                                var td = _ethTypedDataSummary(req.Context.EthTypedDataJson);
+                                                <p class="mb-1 text-muted small">
+                                                    <strong>Typed data (EIP-712):</strong> <code>@td.PrimaryType</code>
                                                 </p>
+                                                @if (!string.IsNullOrEmpty(td.DomainName))
+                                                {
+                                                    <p class="mb-1 text-muted small">
+                                                        Domain: <code>@td.DomainName@(td.DomainVersion is null ? "" : $" v{td.DomainVersion}")</code>
+                                                    </p>
+                                                }
+                                                @if (td.VerifyingContract is not null)
+                                                {
+                                                    <p class="mb-1 text-muted small" style="word-break: break-all;">
+                                                        Contract: <code>@td.VerifyingContract</code>
+                                                    </p>
+                                                }
+                                                <details class="mb-2">
+                                                    <summary class="text-muted small">Show full message</summary>
+                                                    <pre class="text-muted small" style="white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto;">@req.Context.EthTypedDataJson</pre>
+                                                </details>
+                                            }
+                                            else if (req.Context.EthMessageKind == EthMessageKind.Transaction && !string.IsNullOrEmpty(req.Context.EthTransactionJson))
+                                            {
+                                                var tx = _ethTransactionSummary(req.Context.EthTransactionJson);
+                                                @if (!string.IsNullOrEmpty(tx.To))
+                                                {
+                                                    <p class="mb-1 text-muted small" style="word-break: break-all;">
+                                                        To: <code>@tx.To</code>
+                                                    </p>
+                                                }
+                                                else
+                                                {
+                                                    <p class="mb-1 text-muted small">
+                                                        <strong>Contract creation</strong>
+                                                    </p>
+                                                }
+                                                @if (!string.IsNullOrEmpty(tx.ValueDisplay))
+                                                {
+                                                    <p class="mb-1 text-muted small">
+                                                        Value: <code>@tx.ValueDisplay</code>
+                                                    </p>
+                                                }
+                                                @if (!string.IsNullOrEmpty(tx.GasDisplay))
+                                                {
+                                                    <p class="mb-1 text-muted small">
+                                                        Gas: <code>@tx.GasDisplay</code>
+                                                    </p>
+                                                }
+                                                @if (!string.IsNullOrEmpty(tx.MaxFeeDisplay))
+                                                {
+                                                    <p class="mb-1 text-muted small">
+                                                        Max fee: <code>@tx.MaxFeeDisplay</code>
+                                                    </p>
+                                                }
+                                                @if (!string.IsNullOrEmpty(tx.DataPreview))
+                                                {
+                                                    <p class="mb-1 text-muted small" style="word-break: break-all;">
+                                                        Data: <code>@tx.DataPreview</code>
+                                                    </p>
+                                                }
+                                                <details class="mb-2">
+                                                    <summary class="text-muted small">Show raw JSON</summary>
+                                                    <pre class="text-muted small" style="white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto;">@req.Context.EthTransactionJson</pre>
+                                                </details>
                                             }
                                             else
                                             {
@@ -862,23 +923,35 @@
     private async Task ApproveEthSignAsync(PendingRequest req)
     {
         // Validate ETH-specific context before either crypto path runs.
-        // Today only personal_sign is wired end-to-end on the phone side;
-        // typed_data + transaction earn their own approval methods when
-        // the EIP-712 / RLP digest computation lands (next sprint).
+        // All three message kinds are now wired end-to-end: personal_sign
+        // (EIP-191), typed_data (EIP-712), and transaction (EIP-1559 raw
+        // signed bytes ready for eth_sendRawTransaction).
         var msgKind = req.Context.EthMessageKind;
         if (string.IsNullOrEmpty(msgKind))
         {
             _pollingError = "eth_sign request missing eth_message_kind.";
             return;
         }
-        if (msgKind != EthMessageKind.PersonalSign)
+        if (msgKind != EthMessageKind.PersonalSign
+            && msgKind != EthMessageKind.TypedData
+            && msgKind != EthMessageKind.Transaction)
         {
-            _pollingError = $"eth_sign kind '{msgKind}' is not yet implemented; only personal_sign is wired today.";
+            _pollingError = $"eth_sign kind '{msgKind}' is not recognized.";
             return;
         }
-        if (string.IsNullOrEmpty(req.Context.EthMessageText))
+        if (msgKind == EthMessageKind.PersonalSign && string.IsNullOrEmpty(req.Context.EthMessageText))
         {
             _pollingError = "eth_sign personal_sign request missing eth_message_text.";
+            return;
+        }
+        if (msgKind == EthMessageKind.TypedData && string.IsNullOrEmpty(req.Context.EthTypedDataJson))
+        {
+            _pollingError = "eth_sign typed_data request missing eth_typed_data_json.";
+            return;
+        }
+        if (msgKind == EthMessageKind.Transaction && string.IsNullOrEmpty(req.Context.EthTransactionJson))
+        {
+            _pollingError = "eth_sign transaction request missing eth_transaction_json.";
             return;
         }
         if (string.IsNullOrEmpty(req.Context.PayloadHashB64u))
@@ -891,21 +964,48 @@
             ? "m/44'/60'/0'/0/0"
             : req.Context.EthDerivationPath!;
 
-        _processingText = "Signing with ETH key...";
+        _processingText = msgKind switch
+        {
+            EthMessageKind.PersonalSign => "Signing with ETH key (EIP-191)...",
+            EthMessageKind.TypedData => "Signing with ETH key (EIP-712)...",
+            EthMessageKind.Transaction => "Signing with ETH key (EIP-1559)...",
+            _ => "Signing with ETH key...",
+        };
         StateHasChanged();
         await Task.Yield();
 
         // Phone produces TWO signatures:
-        //   (a) secp256k1 r||s||v over the EIP-191 hash of the message,
-        //       returned in RespondRequest.EthSignatureRsv. Opaque to the
-        //       bootloader; consumed by the smart contract / off-chain
-        //       verifier.
+        //   (a) secp256k1 over the kind-specific digest (EIP-191 hash for
+        //       personal_sign, EIP-712 hash for typed_data, EIP-1559 hash
+        //       for transaction). For personal_sign + typed_data the
+        //       result is 65-byte r||s||v with v ∈ {27, 28}; for
+        //       transaction the result is the FULL raw signed-tx bytes
+        //       (0x02 || rlp([fields..., yParity, r, s])) ready for
+        //       eth_sendRawTransaction. All three return as
+        //       RespondRequest.EthSignatureRsv (the field name is a
+        //       slight misnomer for transaction's case, but the wire
+        //       protocol pre-dates that distinction; bootloader does
+        //       structure-only validation, so it forwards opaquely).
         //   (b) Ed25519 over the bootloader-supplied payload_hash_b64u,
         //       returned in RespondRequest.SignatureB64u. Proves the
         //       response came from the paired phone -- same envelope
         //       single_sign uses.
-        var signResult = await EthSigner.SignPersonalSignAsync(
-            EthKeyAlias, derivationPath, req.Context.EthMessageText!, CancellationToken.None);
+        Result<string> signResult;
+        if (msgKind == EthMessageKind.PersonalSign)
+        {
+            signResult = await EthSigner.SignPersonalSignAsync(
+                EthKeyAlias, derivationPath, req.Context.EthMessageText!, CancellationToken.None);
+        }
+        else if (msgKind == EthMessageKind.TypedData)
+        {
+            signResult = await EthSigner.SignTypedDataAsync(
+                EthKeyAlias, derivationPath, req.Context.EthTypedDataJson!, CancellationToken.None);
+        }
+        else // Transaction
+        {
+            signResult = await EthSigner.SignTransactionAsync(
+                EthKeyAlias, derivationPath, req.Context.EthTransactionJson!, CancellationToken.None);
+        }
         if (signResult.IsFailure)
         {
             _pollingError = signResult.Error.Message;
@@ -1524,13 +1624,38 @@
 
     private static string _ethChainLabel(long? chainId) => chainId switch
     {
+        // Ethereum mainnet + the major L1/L2/EVM-compatible chains
+        // operators are likely to encounter. The eth_sign credential
+        // works identically across all of these — it's the same
+        // secp256k1 + EIP-191 / EIP-712 / EIP-1559 stack; the chain
+        // id only matters for transaction signing's EIP-155 replay
+        // protection. Adding a chain here lets the operator UI show
+        // a friendly label instead of "chain N".
         1 => "Ethereum mainnet (1)",
-        8453 => "Base (8453)",
-        84532 => "Base Sepolia (84532)",
-        11155111 => "Sepolia (11155111)",
-        137 => "Polygon (137)",
+        // Layer-2 rollups (Ethereum-secured)
         10 => "Optimism (10)",
         42161 => "Arbitrum One (42161)",
+        8453 => "Base (8453)",
+        324 => "zkSync Era (324)",
+        59144 => "Linea (59144)",
+        534352 => "Scroll (534352)",
+        // Sidechains / alt-L1s with EVM compatibility
+        56 => "BNB Smart Chain (56)",
+        137 => "Polygon (137)",
+        1101 => "Polygon zkEVM (1101)",
+        43114 => "Avalanche C-chain (43114)",
+        100 => "Gnosis Chain (100)",
+        25 => "Cronos (25)",
+        250 => "Fantom (250)",
+        // Public testnets
+        11155111 => "Ethereum Sepolia (11155111)",
+        17000 => "Ethereum Holesky (17000)",
+        84532 => "Base Sepolia (84532)",
+        421614 => "Arbitrum Sepolia (421614)",
+        11155420 => "Optimism Sepolia (11155420)",
+        80002 => "Polygon Amoy (80002)",
+        43113 => "Avalanche Fuji (43113)",
+        97 => "BNB Smart Chain testnet (97)",
         null => "(unspecified)",
         _ => $"chain {chainId}",
     };
@@ -1551,4 +1676,139 @@
         null => "(unspecified)",
         _ => network!,
     };
+
+    // ---------------------------------------------------------------
+    // Operator-facing summaries for EIP-712 typed data + EIP-1559
+    // transactions. Best-effort parsing — if the JSON shape is wrong
+    // (malformed, missing fields), the UI still renders the raw JSON
+    // in the <details> dropdown so the operator can inspect manually.
+    // ---------------------------------------------------------------
+
+    private record EthTypedDataSummary(
+        string PrimaryType,
+        string? DomainName,
+        string? DomainVersion,
+        string? VerifyingContract);
+
+    private static EthTypedDataSummary _ethTypedDataSummary(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new("(unknown)", null, null, null);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            string primaryType = root.TryGetProperty("primaryType", out var pt) ? (pt.GetString() ?? "(unknown)") : "(unknown)";
+            string? domainName = null, domainVersion = null, verifyingContract = null;
+            if (root.TryGetProperty("domain", out var dom) && dom.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                if (dom.TryGetProperty("name", out var n)) domainName = n.GetString();
+                if (dom.TryGetProperty("version", out var v)) domainVersion = v.GetString();
+                if (dom.TryGetProperty("verifyingContract", out var vc)) verifyingContract = vc.GetString();
+            }
+            return new(primaryType, domainName, domainVersion, verifyingContract);
+        }
+        catch
+        {
+            return new("(parse error)", null, null, null);
+        }
+    }
+
+    private record EthTransactionSummary(
+        string? To,
+        string? ValueDisplay,
+        string? GasDisplay,
+        string? MaxFeeDisplay,
+        string? DataPreview);
+
+    private static EthTransactionSummary _ethTransactionSummary(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new(null, null, null, null, null);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            string? to = root.TryGetProperty("to", out var toEl) ? toEl.GetString() : null;
+            string? valueDisplay = _formatWeiField(root, "value");
+            string? gasDisplay = null;
+            if (root.TryGetProperty("gas", out var g)) gasDisplay = _readNumberField(g);
+            else if (root.TryGetProperty("gasLimit", out var gl)) gasDisplay = _readNumberField(gl);
+            string? maxFeeDisplay = root.TryGetProperty("maxFeePerGas", out var mf)
+                ? _formatGwei(_readNumberField(mf))
+                : null;
+            string? dataPreview = null;
+            if (root.TryGetProperty("data", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                var s = d.GetString() ?? "";
+                if (!string.IsNullOrEmpty(s) && s != "0x")
+                {
+                    dataPreview = s.Length > 24 ? s[..24] + "..." : s;
+                }
+            }
+            return new(to, valueDisplay, gasDisplay, maxFeeDisplay, dataPreview);
+        }
+        catch
+        {
+            return new(null, null, null, null, null);
+        }
+    }
+
+    private static string? _readNumberField(System.Text.Json.JsonElement el)
+    {
+        if (el.ValueKind == System.Text.Json.JsonValueKind.Number) return el.GetInt64().ToString();
+        if (el.ValueKind == System.Text.Json.JsonValueKind.String) return el.GetString();
+        return null;
+    }
+
+    private static string? _formatWeiField(System.Text.Json.JsonElement root, string fieldName)
+    {
+        if (!root.TryGetProperty(fieldName, out var el)) return null;
+        var raw = _readNumberField(el);
+        if (string.IsNullOrEmpty(raw)) return null;
+        try
+        {
+            var wei = raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                ? System.Numerics.BigInteger.Parse("0" + raw[2..], System.Globalization.NumberStyles.HexNumber)
+                : System.Numerics.BigInteger.Parse(raw);
+            // Display in ETH if >= 1e15 wei (0.001 ETH), gwei otherwise.
+            var oneEth = System.Numerics.BigInteger.Pow(10, 18);
+            var oneGwei = System.Numerics.BigInteger.Pow(10, 9);
+            if (wei >= oneEth / 1000)
+            {
+                var ethWhole = wei / oneEth;
+                var ethFrac = (wei % oneEth) * 1000000 / oneEth;
+                return $"{ethWhole}.{ethFrac:D6} ETH ({raw} wei)";
+            }
+            else if (wei > 0)
+            {
+                var gwei = wei / oneGwei;
+                return $"{gwei} gwei ({raw} wei)";
+            }
+            return "0 wei";
+        }
+        catch
+        {
+            return raw + " wei";
+        }
+    }
+
+    private static string? _formatGwei(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return null;
+        try
+        {
+            var wei = raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                ? System.Numerics.BigInteger.Parse("0" + raw[2..], System.Globalization.NumberStyles.HexNumber)
+                : System.Numerics.BigInteger.Parse(raw);
+            var oneGwei = System.Numerics.BigInteger.Pow(10, 9);
+            if (wei == 0) return "0 gwei";
+            var gwei = wei / oneGwei;
+            var rem = wei % oneGwei;
+            if (rem == 0) return $"{gwei} gwei";
+            return $"{gwei}.{(rem * 1000 / oneGwei):D3} gwei";
+        }
+        catch
+        {
+            return raw + " wei";
+        }
+    }
 }

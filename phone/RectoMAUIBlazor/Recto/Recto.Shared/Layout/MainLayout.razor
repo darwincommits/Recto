@@ -1,0 +1,43 @@
+@inherits LayoutComponentBase
+@inject NavigationManager Nav
+
+@*
+  Recto vault shell. Single-column phone layout — no sidebar (the
+  default Blazor template's sidebar is a desktop-app idiom that
+  wastes the only valuable real estate on a phone). A slim top bar
+  carries the brand mark on the left (acts as a Home link) and the
+  settings gear on the right; everything else flows in the content
+  area below.
+
+  Design language: vault. Deep-slate background, copper/gold accents
+  reserved for primary CTAs, monospace brand mark to evoke
+  infrastructure tooling rather than consumer app polish. Color
+  tokens live in app.css under :root so per-page CSS can lean on
+  var(--rec-*) consistently.
+*@
+
+<div class="rec-shell">
+    <header class="rec-topbar">
+        <a class="rec-brand" href="/" title="Recto home">
+            <span class="rec-brand-mark">▣</span>
+            <span class="rec-brand-text">RECTO</span>
+        </a>
+        <button type="button"
+                class="rec-iconbtn"
+                title="Settings"
+                aria-label="Settings"
+                @onclick="@(() => Nav.NavigateTo("/settings"))">
+            &#9881;
+        </button>
+    </header>
+
+    <main class="rec-content">
+        @Body
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">&#128473;</span>
+</div>

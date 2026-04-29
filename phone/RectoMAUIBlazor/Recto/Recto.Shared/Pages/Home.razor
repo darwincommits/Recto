@@ -21,16 +21,25 @@
 
 <PageTitle>Recto</PageTitle>
 
-<div class="d-flex flex-column align-items-center justify-content-center text-center py-5 position-relative">
-    <a href="/settings"
-       class="btn btn-link text-muted text-decoration-none position-absolute top-0 end-0 m-3"
-       style="font-size: 2.5rem; line-height: 1; padding: 0.25rem 0.5rem;"
-       title="Settings"
-       aria-label="Settings">
-        &#9881;
-    </a>
-    <h1 class="display-5 fw-bold mb-3">Recto</h1>
-    <p class="lead text-muted mb-4">Phone-resident vault for your services' secrets.</p>
+@*
+    Recto vault — phone-side approval surface.
+
+    Pending requests split into two semantic sections: IDENTITY &
+    ACCESS (single_sign / TOTP / WebAuthn / JWT capability / PKCS#11
+    / PGP — the "common security" credential kinds that authenticate
+    the operator or sign small non-financial payloads) and CRYPTO
+    TOKENS (eth_sign / btc_sign + family — cryptocurrency-custody
+    credential kinds that move money or on-chain authority). The
+    split is driven by IsTokenSigningKind() in @code; adding a new
+    kind needs one switch arm + one entry there.
+
+    Settings gear is now in MainLayout's topbar. Brand wordmark
+    lives there too, so this page just carries the tagline + paired
+    state + pending-request sections.
+*@
+
+<div class="rec-home">
+    <p class="rec-tagline">Phone-resident vault for your services' secrets.</p>
 
     @if (_paired is not null)
     {
@@ -123,31 +132,34 @@
                     </div>
                 }
 
-                <div class="text-start small">
-                    <p class="mb-2 fw-semibold">
-                        Pending requests
+                <div class="rec-pending text-start small">
+                    <div class="rec-pending-header">
+                        <span class="rec-pending-title">Pending requests</span>
                         @if (_pending.Count > 0)
                         {
-                            <span class="badge bg-primary ms-1">@_pending.Count</span>
+                            <span class="badge bg-primary">@_pending.Count</span>
                         }
-                    </p>
+                    </div>
 
                     @if (_pending.Count == 0)
                     {
-                        <div class="text-center text-muted py-3 mb-0" style="opacity:0.7;">
-                            <div style="font-size:1.5em; line-height:1;">&#10003;</div>
-                            <div class="small mt-1">All caught up</div>
-                            <div class="small text-muted" style="font-size:0.78em;">
-                                Nothing waiting for your approval.
-                            </div>
+                        <div class="rec-empty">
+                            <div class="rec-empty-mark">&#10003;</div>
+                            <div class="rec-empty-line">All caught up</div>
+                            <div class="rec-empty-sub">Nothing waiting for your approval.</div>
                         </div>
                     }
                     else
                     {
-                        @foreach (var req in _pending)
-                        {
-                            <div class="card mb-2 border-primary-subtle">
-                                <div class="card-body p-3">
+                        // Per-request card body lives in a single
+                        // RenderFragment template so both sections share
+                        // one source of truth. We're already in C# context
+                        // inside the else { } block, so no @{ } wrapper
+                        // is needed (Razor RZ1010: "you do not need to
+                        // use @{ to switch to code").
+                        RenderFragment<PendingRequest> renderCard = (PendingRequest req) =>
+                            @<div class="rec-pending-card" data-kind="@req.Kind">
+                                <div class="rec-pending-card-body">
                                     @switch (req.Kind)
                                     {
                                         case PendingRequestKind.SingleSign:
@@ -244,7 +256,7 @@
                                             break;
                                         case PendingRequestKind.BtcSign:
                                             <p class="mb-1 fw-semibold">
-                                                <span class="badge me-1" style="background-color: #f7931a; color: white;">BTC</span>@(_btcMessageKindLabel(req.Context.BtcMessageKind))
+                                                <span class="rec-coin-badge rec-coin-badge-btc">BTC</span>@(_btcMessageKindLabel(req.Context.BtcMessageKind))
                                             </p>
                                             <p class="mb-1 text-muted small">
                                                 Network: <code>@(_btcNetworkLabel(req.Context.BtcNetwork))</code>
@@ -277,7 +289,7 @@
                                             break;
                                         case PendingRequestKind.EthSign:
                                             <p class="mb-1 fw-semibold">
-                                                <span class="badge bg-warning text-dark me-1">ETH</span>@(_ethMessageKindLabel(req.Context.EthMessageKind))
+                                                <span class="rec-coin-badge rec-coin-badge-eth">ETH</span>@(_ethMessageKindLabel(req.Context.EthMessageKind))
                                             </p>
                                             <p class="mb-1 text-muted small">
                                                 Chain: <code>@(_ethChainLabel(req.Context.EthChainId))</code>
@@ -398,7 +410,39 @@
                                         </div>
                                     }
                                 </div>
-                            </div>
+                            </div>;
+
+                            var identityReqs = _pending.Where(r => !IsTokenSigningKind(r.Kind)).ToList();
+                            var tokenReqs = _pending.Where(r => IsTokenSigningKind(r.Kind)).ToList();
+
+                        @if (identityReqs.Count > 0)
+                        {
+                            <section class="rec-section rec-section-identity">
+                                <div class="rec-section-header">
+                                    <span class="rec-section-mark">●</span>
+                                    <span class="rec-section-title">Identity &amp; Access</span>
+                                    <span class="rec-section-count">@identityReqs.Count</span>
+                                </div>
+                                @foreach (var req in identityReqs)
+                                {
+                                    @renderCard(req)
+                                }
+                            </section>
+                        }
+
+                        @if (tokenReqs.Count > 0)
+                        {
+                            <section class="rec-section rec-section-tokens">
+                                <div class="rec-section-header">
+                                    <span class="rec-section-mark">◆</span>
+                                    <span class="rec-section-title">Crypto Tokens</span>
+                                    <span class="rec-section-count">@tokenReqs.Count</span>
+                                </div>
+                                @foreach (var req in tokenReqs)
+                                {
+                                    @renderCard(req)
+                                }
+                            </section>
                         }
                     }
                 </div>
@@ -1620,6 +1664,23 @@
         EthMessageKind.TypedData => "Sign typed data (EIP-712)",
         EthMessageKind.Transaction => "Sign transaction (RLP)",
         _ => "ETH sign",
+    };
+
+    /// <summary>
+    /// Categorize a PendingRequest.Kind into one of two visual sections:
+    ///   true  → Crypto Tokens (cryptocurrency-custody credential
+    ///           kinds: eth_sign, btc_sign + family). Approvals here
+    ///           move money or move on-chain authority.
+    ///   false → Identity &amp; Access (single_sign, totp_*, session_*,
+    ///           webauthn_assert, pkcs11_sign, pgp_sign). Approvals
+    ///           here authenticate the operator or sign small non-
+    ///           financial payloads.
+    /// </summary>
+    private static bool IsTokenSigningKind(string kind) => kind switch
+    {
+        PendingRequestKind.EthSign => true,
+        PendingRequestKind.BtcSign => true,
+        _ => false,
     };
 
     private static string _ethChainLabel(long? chainId) => chainId switch

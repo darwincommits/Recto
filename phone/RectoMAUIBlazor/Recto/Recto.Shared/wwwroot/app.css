@@ -1,0 +1,218 @@
+/*
+   Recto vault — global design tokens + theming overrides.
+
+   Recto is infrastructure tooling that holds your most-sensitive
+   secrets (BIP-39 mnemonics, capability JWTs, TOTP seeds, PGP keys).
+   The visual language reflects that: deep slate backgrounds, copper/
+   gold accent reserved for the primary trust path, monospace brand
+   mark, sober color use. Two semantic axes are surfaced as separate
+   accent families:
+
+     --rec-accent        copper-gold; primary brand + Home pill
+     --rec-cat-tokens    crypto-token category accent (Bitcoin orange)
+     --rec-cat-identity  identity-and-access category accent (steel)
+
+   Per-coin badge colors live in their own variables so an LTC card
+   can paint LTC blue, a DOGE card paints DOGE gold, etc., without
+   the design system having to enumerate them in one global place.
+*/
+
+:root {
+    color-scheme: dark;
+
+    /* ---- Surfaces ---- */
+    --rec-bg:           #0d1117;
+    --rec-bg-deep:      #07090d;
+    --rec-surface:      #161b22;
+    --rec-surface-hi:   #21262d;
+    --rec-surface-lo:   #0f141b;
+    --rec-border:       #30363d;
+    --rec-border-hi:    #424a55;
+
+    /* ---- Text ---- */
+    --rec-text:         #e6edf3;
+    --rec-text-muted:   #8b949e;
+    --rec-text-dim:     #6e7681;
+
+    /* ---- Brand + status ---- */
+    --rec-accent:       #d4a554;  /* vault gold */
+    --rec-accent-hi:    #e8b96a;
+    --rec-accent-bg:    #2a2218;
+    --rec-success:      #3fb950;
+    --rec-success-bg:   #142d1c;
+    --rec-warning:      #d29922;
+    --rec-warning-bg:   #2a230f;
+    --rec-danger:       #f85149;
+    --rec-danger-bg:    #2d1416;
+    --rec-info:         #58a6ff;
+    --rec-info-bg:      #0e1f3a;
+
+    /* ---- Category accents ---- */
+    --rec-cat-tokens:   #f7931a;  /* Bitcoin orange — family signifier */
+    --rec-cat-tokens-bg:#2a1d0f;
+    --rec-cat-identity: #7d8590;  /* steel grey */
+    --rec-cat-identity-bg:#1a1e25;
+
+    /* ---- Per-coin badge colors ---- */
+    --rec-coin-btc:     #f7931a;
+    --rec-coin-eth:     #627eea;
+    --rec-coin-ltc:     #345d9d;
+    --rec-coin-doge:    #c2a633;
+    --rec-coin-bch:     #0ac18e;
+
+    /* ---- Typography ---- */
+    --rec-font-sans:    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --rec-font-mono:    "JetBrains Mono", "Cascadia Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+html, body {
+    background: var(--rec-bg);
+    color: var(--rec-text);
+    font-family: var(--rec-font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+a, .btn-link {
+    color: var(--rec-accent);
+    text-decoration: none;
+}
+
+a:hover, .btn-link:hover { color: var(--rec-accent-hi); }
+
+code {
+    font-family: var(--rec-font-mono);
+    color: var(--rec-text);
+    background: var(--rec-surface-lo);
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.2rem;
+    font-size: 0.85em;
+}
+
+pre {
+    font-family: var(--rec-font-mono);
+    color: var(--rec-text);
+    background: var(--rec-surface-lo);
+    padding: 0.6rem 0.8rem;
+    border-radius: 0.35rem;
+    border: 1px solid var(--rec-border);
+}
+
+hr {
+    border: 0;
+    border-top: 1px solid var(--rec-border);
+    opacity: 1;
+    margin: 1rem 0;
+}
+
+/* ---- Bootstrap overrides — keep existing markup compatible ---- */
+
+.card {
+    background: var(--rec-surface);
+    border: 1px solid var(--rec-border);
+    color: var(--rec-text);
+}
+
+.card.shadow-sm { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+
+.text-muted { color: var(--rec-text-muted) !important; }
+.text-success { color: var(--rec-success) !important; }
+.text-warning { color: var(--rec-warning) !important; }
+.text-danger  { color: var(--rec-danger) !important; }
+.text-info    { color: var(--rec-info) !important; }
+
+.btn { font-family: var(--rec-font-sans); }
+
+.btn-primary {
+    color: var(--rec-bg-deep);
+    background: var(--rec-accent);
+    border-color: var(--rec-accent);
+}
+.btn-primary:hover, .btn-primary:focus {
+    color: var(--rec-bg-deep);
+    background: var(--rec-accent-hi);
+    border-color: var(--rec-accent-hi);
+}
+.btn-primary:disabled { background: var(--rec-accent); border-color: var(--rec-accent); opacity: 0.5; }
+
+.btn-success { background: var(--rec-success); border-color: var(--rec-success); color: #0a1410; }
+.btn-success:hover, .btn-success:focus { background: #4cc961; border-color: #4cc961; color: #0a1410; }
+
+.btn-outline-secondary {
+    color: var(--rec-text-muted);
+    border-color: var(--rec-border);
+    background: transparent;
+}
+.btn-outline-secondary:hover, .btn-outline-secondary:focus {
+    color: var(--rec-text);
+    background: var(--rec-surface-hi);
+    border-color: var(--rec-border-hi);
+}
+
+.btn-outline-primary {
+    color: var(--rec-accent);
+    border-color: var(--rec-accent);
+    background: transparent;
+}
+.btn-outline-primary:hover, .btn-outline-primary:focus {
+    color: var(--rec-bg-deep);
+    background: var(--rec-accent);
+    border-color: var(--rec-accent);
+}
+
+.btn:focus, .btn:active:focus, .form-control:focus, .form-check-input:focus {
+    box-shadow: 0 0 0 0.15rem rgba(212, 165, 84, 0.35);
+    outline: none;
+}
+
+.btn-close {
+    filter: invert(1) grayscale(100%) brightness(1.5);
+}
+
+.alert {
+    background: var(--rec-surface);
+    border: 1px solid var(--rec-border);
+    color: var(--rec-text);
+}
+.alert-info    { background: var(--rec-info-bg);    border-color: var(--rec-info); }
+.alert-warning { background: var(--rec-warning-bg); border-color: var(--rec-warning); }
+.alert-danger  { background: var(--rec-danger-bg);  border-color: var(--rec-danger); }
+.alert-success { background: var(--rec-success-bg); border-color: var(--rec-success); }
+
+.badge { font-family: var(--rec-font-mono); font-weight: 600; letter-spacing: 0.04em; }
+.badge.bg-secondary { background: var(--rec-surface-hi) !important; color: var(--rec-text-muted); }
+.badge.bg-warning   { background: var(--rec-warning-bg) !important; color: var(--rec-warning); border: 1px solid var(--rec-warning); }
+.badge.bg-info      { background: var(--rec-info-bg) !important;    color: var(--rec-info); border: 1px solid var(--rec-info); }
+.badge.bg-success   { background: var(--rec-success-bg) !important; color: var(--rec-success); border: 1px solid var(--rec-success); }
+.badge.bg-primary   { background: var(--rec-accent-bg) !important;  color: var(--rec-accent); border: 1px solid var(--rec-accent); }
+
+.form-control, .form-select {
+    background: var(--rec-surface-lo);
+    border: 1px solid var(--rec-border);
+    color: var(--rec-text);
+}
+.form-control:focus, .form-select:focus {
+    background: var(--rec-surface-lo);
+    color: var(--rec-text);
+    border-color: var(--rec-accent);
+}
+.form-control::placeholder { color: var(--rec-text-dim); }
+
+.spinner-border { color: var(--rec-accent); }
+
+/* ---- Validation states ---- */
+
+.valid.modified:not([type=checkbox]) { outline: 1px solid var(--rec-success); }
+.invalid { outline: 1px solid var(--rec-danger); }
+.validation-message { color: var(--rec-danger); }
+
+h1:focus { outline: none; }
+
+.blazor-error-boundary {
+    background: var(--rec-danger-bg);
+    color: var(--rec-text);
+    padding: 1rem;
+    border: 1px solid var(--rec-danger);
+    border-radius: 0.4rem;
+}
+.blazor-error-boundary::after { content: "An error has occurred."; }

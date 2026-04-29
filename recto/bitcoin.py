@@ -251,21 +251,125 @@ def _varint_encode(n: int) -> bytes:
     raise ValueError(f"varint too large: {n}")
 
 
-def signed_message_hash(message: bytes) -> bytes:
-    """Compute the Bitcoin signed-message hash (BIP-137).
+# ---------------------------------------------------------------------------
+# Bitcoin-family coin config (BTC + LTC + DOGE + BCH)
+# ---------------------------------------------------------------------------
+#
+# Every coin in the Bitcoin family uses the SAME crypto primitives:
+# secp256k1 ECDSA + double-SHA-256 + BIP-137 compact signatures + HASH160
+# (RIPEMD-160 of SHA-256). They differ in three ways:
+#   1. Signed-message preamble string (e.g. "Bitcoin Signed Message:\n"
+#      vs "Litecoin Signed Message:\n" vs "Dogecoin Signed Message:\n").
+#      BCH retained Bitcoin's preamble post-fork.
+#   2. Address format: P2PKH version byte (e.g. 0x00 BTC, 0x30 LTC,
+#      0x1E DOGE, 0x00 BCH legacy), P2SH version byte, bech32 HRP for
+#      native SegWit (where supported).
+#   3. BIP-44 coin type (0=BTC, 2=LTC, 3=DOGE, 145=BCH).
+#
+# This table is the SINGLE place those differences are encoded. Adding
+# a fifth coin (e.g. ZEC if the privacy posture were ever revisited)
+# is one entry plus a test vector.
+#
+# Address-kind defaults reflect the dominant ecosystem norm:
+# BTC + LTC default to native-SegWit P2WPKH (BIP-84 path); DOGE + BCH
+# default to legacy P2PKH (BIP-44 path) because neither chain widely
+# adopted native SegWit. BCH's CashAddr format is preferred in the
+# BCH ecosystem but legacy P2PKH `1...` addresses still verify on
+# every BCH wallet — CashAddr support is reserved for a follow-up.
+
+COIN_CONFIG = {
+    "btc": {
+        "name": "Bitcoin",
+        "preamble": b"Bitcoin Signed Message:\n",
+        "p2pkh_version_mainnet": 0x00,
+        "p2pkh_version_testnet": 0x6F,
+        "p2sh_version_mainnet": 0x05,
+        "p2sh_version_testnet": 0xC4,
+        "bech32_hrp_mainnet": "bc",
+        "bech32_hrp_testnet": "tb",
+        "bech32_hrp_regtest": "bcrt",
+        "bip44_coin_type": 0,
+        "default_address_kind": "p2wpkh",
+        "default_path": "m/84'/0'/0'/0/0",
+    },
+    "ltc": {
+        "name": "Litecoin",
+        "preamble": b"Litecoin Signed Message:\n",
+        "p2pkh_version_mainnet": 0x30,   # `L...` addresses
+        "p2pkh_version_testnet": 0x6F,
+        "p2sh_version_mainnet": 0x32,    # `M...` addresses (post-2018; 0x05 deprecated)
+        "p2sh_version_testnet": 0x3A,
+        "bech32_hrp_mainnet": "ltc",
+        "bech32_hrp_testnet": "tltc",
+        "bech32_hrp_regtest": "rltc",
+        "bip44_coin_type": 2,
+        "default_address_kind": "p2wpkh",
+        "default_path": "m/84'/2'/0'/0/0",
+    },
+    "doge": {
+        "name": "Dogecoin",
+        "preamble": b"Dogecoin Signed Message:\n",
+        "p2pkh_version_mainnet": 0x1E,   # `D...` addresses
+        "p2pkh_version_testnet": 0x71,
+        "p2sh_version_mainnet": 0x16,    # `9...`/`A...` addresses
+        "p2sh_version_testnet": 0xC4,
+        "bech32_hrp_mainnet": None,      # DOGE never adopted native SegWit
+        "bech32_hrp_testnet": None,
+        "bech32_hrp_regtest": None,
+        "bip44_coin_type": 3,
+        "default_address_kind": "p2pkh",
+        "default_path": "m/44'/3'/0'/0/0",
+    },
+    "bch": {
+        "name": "Bitcoin Cash",
+        # BCH retained Bitcoin's signed-message preamble post-fork.
+        "preamble": b"Bitcoin Signed Message:\n",
+        "p2pkh_version_mainnet": 0x00,   # legacy `1...` addresses (CashAddr deferred)
+        "p2pkh_version_testnet": 0x6F,
+        "p2sh_version_mainnet": 0x05,
+        "p2sh_version_testnet": 0xC4,
+        "bech32_hrp_mainnet": None,      # BCH uses CashAddr, not bech32
+        "bech32_hrp_testnet": None,
+        "bech32_hrp_regtest": None,
+        "bip44_coin_type": 145,
+        "default_address_kind": "p2pkh",
+        "default_path": "m/44'/145'/0'/0/0",
+    },
+}
+
+
+def _coin_cfg(coin: str) -> dict:
+    """Look up the coin-config entry, raising a clear error for unknowns."""
+    coin = coin.lower()
+    if coin not in COIN_CONFIG:
+        raise ValueError(
+            f"coin must be one of {list(COIN_CONFIG)}, got {coin!r}"
+        )
+    return COIN_CONFIG[coin]
+
+
+def signed_message_hash(message: bytes, coin: str = "btc") -> bytes:
+    """Compute the BIP-137 signed-message hash for the given coin.
 
     Layout:
-        double_sha256(0x18 || "Bitcoin Signed Message:\\n"
+        double_sha256(<len byte> || <preamble>
                       || varint(len(msg)) || msg)
 
-    Where 0x18 is the magic prefix byte (24 = length of the literal
-    string "Bitcoin Signed Message:\\n"). This is what every
-    consumer-grade Bitcoin wallet (Bitcoin Core, Electrum, hardware
-    wallets) computes when the user clicks "Sign Message" on a string.
+    Where <preamble> is the coin-specific magic string (e.g.
+    "Bitcoin Signed Message:\\n" / "Litecoin Signed Message:\\n" /
+    "Dogecoin Signed Message:\\n"). BCH retained Bitcoin's preamble
+    post-fork. The leading length byte is dynamic (24 for BTC's 24-
+    char preamble, 25 for LTC/DOGE's 25-char preamble) — every coin
+    in the family computes it the same way.
+
+    This is what every consumer-grade wallet of each coin (Bitcoin
+    Core, Electrum, Litecoin Core, Dogecoin Core, Bitcoin Cash Node,
+    hardware wallets) computes when the user clicks "Sign Message".
     """
     if isinstance(message, str):
         message = message.encode("utf-8")
-    prefix_str = b"Bitcoin Signed Message:\n"
+    cfg = _coin_cfg(coin)
+    prefix_str = cfg["preamble"]
     prefix = bytes([len(prefix_str)]) + prefix_str
     body = _varint_encode(len(message)) + message
     return double_sha256(prefix + body)
@@ -426,37 +530,86 @@ _NETWORK_HRPS = {
 }
 
 
+def _hrp_for(coin: str, network: str) -> str | None:
+    """Resolve the bech32 HRP for ``(coin, network)``, returning None
+    if the coin doesn't support bech32 (DOGE, BCH)."""
+    cfg = _coin_cfg(coin)
+    if network in ("mainnet",):
+        return cfg["bech32_hrp_mainnet"]
+    if network in ("testnet", "signet"):
+        return cfg["bech32_hrp_testnet"]
+    if network == "regtest":
+        return cfg["bech32_hrp_regtest"]
+    raise ValueError(f"network must be mainnet/testnet/signet/regtest, got {network!r}")
+
+
+def _p2pkh_version_for(coin: str, network: str) -> int:
+    cfg = _coin_cfg(coin)
+    if network == "mainnet":
+        return cfg["p2pkh_version_mainnet"]
+    if network in ("testnet", "signet", "regtest"):
+        return cfg["p2pkh_version_testnet"]
+    raise ValueError(f"network must be mainnet/testnet/signet/regtest, got {network!r}")
+
+
+def _p2sh_version_for(coin: str, network: str) -> int:
+    cfg = _coin_cfg(coin)
+    if network == "mainnet":
+        return cfg["p2sh_version_mainnet"]
+    if network in ("testnet", "signet", "regtest"):
+        return cfg["p2sh_version_testnet"]
+    raise ValueError(f"network must be mainnet/testnet/signet/regtest, got {network!r}")
+
+
 def address_from_public_key(
     pubkey64: bytes,
     network: str = "mainnet",
-    kind: str = "p2wpkh",
+    kind: str | None = None,
+    coin: str = "btc",
 ) -> str:
-    """Derive a Bitcoin address from a 64-byte uncompressed public key.
+    """Derive a Bitcoin-family address from a 64-byte uncompressed public key.
+
+    ``coin`` selects the chain-specific version bytes / HRPs:
+    - ``"btc"`` (default) — Bitcoin: P2WPKH ``bc1q...``, P2PKH ``1...``,
+      P2SH ``3...``.
+    - ``"ltc"`` — Litecoin: P2WPKH ``ltc1q...``, P2PKH ``L...``,
+      P2SH ``M...``.
+    - ``"doge"`` — Dogecoin: P2PKH ``D...`` only (no native SegWit;
+      P2WPKH is rejected with a clear error).
+    - ``"bch"`` — Bitcoin Cash: legacy P2PKH ``1...`` (same shape as
+      BTC's legacy form). CashAddr ``bitcoincash:q...`` reserved for
+      a follow-up.
 
     ``kind`` selects the address type:
-    - ``"p2wpkh"`` (default) — native SegWit, bech32 ``bc1q...`` /
-      ``tb1q...``. Modern wallets default to this.
-    - ``"p2pkh"`` — legacy Base58Check ``1...`` / ``m...`` / ``n...``.
-    - ``"p2sh-p2wpkh"`` — nested SegWit, Base58Check ``3...`` / ``2...``.
+    - ``"p2wpkh"`` — native SegWit, bech32. BTC + LTC only.
+    - ``"p2pkh"`` — legacy Base58Check. All four coins.
+    - ``"p2sh-p2wpkh"`` — nested SegWit, Base58Check. BTC + LTC.
+    - ``None`` — use the coin's default (P2WPKH for BTC/LTC, P2PKH
+      for DOGE/BCH).
 
-    All three derive from HASH160 of the COMPRESSED public key; only
-    the encoding differs. P2TR (Taproot, witver=1, x-only pubkey,
-    bech32m) is reserved for a follow-up.
+    All address kinds derive from HASH160 of the COMPRESSED public
+    key; only the encoding differs.
     """
-    if network not in _NETWORK_HRPS:
-        raise ValueError(f"network must be one of {list(_NETWORK_HRPS)}, got {network!r}")
+    cfg = _coin_cfg(coin)
+    if kind is None:
+        kind = cfg["default_address_kind"]
     pub33 = compress_public_key(pubkey64)
     h160 = hash160(pub33)
     if kind == "p2wpkh":
-        hrp = _NETWORK_HRPS[network]
+        hrp = _hrp_for(coin, network)
+        if hrp is None:
+            raise ValueError(
+                f"{cfg['name']} does not support native SegWit (P2WPKH); "
+                f"use kind='p2pkh' instead"
+            )
         return bech32_encode(hrp, witness_version=0, program=h160)
     if kind == "p2pkh":
-        version = 0x00 if network == "mainnet" else 0x6F
+        version = _p2pkh_version_for(coin, network)
         return _base58check_encode(bytes([version]) + h160)
     if kind == "p2sh-p2wpkh":
         # Redeem script: OP_0 <20-byte hash160> = 0x00 0x14 <hash160>.
         redeem = b"\x00\x14" + h160
-        version = 0x05 if network == "mainnet" else 0xC4
+        version = _p2sh_version_for(coin, network)
         return _base58check_encode(bytes([version]) + hash160(redeem))
     raise ValueError(
         f"address kind must be one of p2wpkh / p2pkh / p2sh-p2wpkh, got {kind!r}"
@@ -579,24 +732,26 @@ def recover_address(
     msg_hash: bytes,
     compact_sig: str | bytes,
     network: str = "mainnet",
+    coin: str = "btc",
 ) -> str:
-    """Recover the P2WPKH address that signed ``msg_hash`` to produce
-    ``compact_sig``.
+    """Recover the address that signed ``msg_hash`` to produce
+    ``compact_sig``, in the address format native to ``coin``.
 
     The BIP-137 header byte ENCODES the address kind the signer
     intended (P2WPKH / P2SH-P2WPKH / P2PKH / P2PKH-uncompressed). We
     return the address kind matching the header byte so verifiers
-    don't have to guess across the address-kind union.
+    don't have to guess across the address-kind union — re-encoded
+    using the coin's version bytes / HRPs.
     """
     pubkey = recover_public_key(msg_hash, compact_sig)
     _, _, _, kind = parse_compact_signature(compact_sig)
     if kind == "p2pkh-uncompressed":
         # Uncompressed P2PKH: HASH160 of the 65-byte uncompressed pub
-        # (0x04 || X || Y), then Base58Check.
-        version = 0x00 if network == "mainnet" else 0x6F
+        # (0x04 || X || Y), then Base58Check using the coin's version.
+        version = _p2pkh_version_for(coin, network)
         h160 = hash160(b"\x04" + pubkey)
         return _base58check_encode(bytes([version]) + h160)
-    return address_from_public_key(pubkey, network=network, kind=kind)
+    return address_from_public_key(pubkey, network=network, kind=kind, coin=coin)
 
 
 def verify_signature(
@@ -604,13 +759,14 @@ def verify_signature(
     compact_sig: str | bytes,
     expected_address: str,
     network: str = "mainnet",
+    coin: str = "btc",
 ) -> bool:
     """Recover the signer from ``compact_sig`` and check it matches
-    ``expected_address``. Returns False rather than raising on any
-    malformed-signature path so consumer code can branch on the
-    boolean without try/except."""
+    ``expected_address`` for ``coin``. Returns False rather than
+    raising on any malformed-signature path so consumer code can
+    branch on the boolean without try/except."""
     try:
-        recovered = recover_address(msg_hash, compact_sig, network=network)
+        recovered = recover_address(msg_hash, compact_sig, network=network, coin=coin)
     except (ValueError, OverflowError):
         return False
     return recovered.lower() == expected_address.lower()

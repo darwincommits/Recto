@@ -254,6 +254,45 @@ in `%USERPROFILE%\private\local.md`.
   agree with the tool-edited tree — sandbox-environment artifact, not a
   real bug. Worth its own entry here because it blocks `pytest` after
   large edit sequences.
+
+- **NEVER `sed -i` line-range deletions on files that file tools (Read/
+  Write/Edit) have touched in the same session — the bash mount and the
+  Windows-side state can be out of sync, and sed will write back its
+  potentially-stale view as truth.** A particularly nasty variant of the
+  FUSE-mount-lag gotcha above. The flow that bit hard during the wave-7
+  UI sprint (2026-04-29):
+  1. Edit tool modifies `Home.razor` (Windows-side file is at full length,
+     ~1900 lines)
+  2. bash `wc -l` reports the file as 915 lines (stale view — actual
+     length differs)
+  3. AI thinks the bash view is truth, runs `sed -i '456,720d' Home.razor`
+     to delete a range it can see in the bash view
+  4. sed acts on the bash mount's view — but writes the result back to the
+     Windows-side file via FUSE, blowing away ~1000 lines of @code block
+     that the bash view had never shown
+  5. `git diff --stat` shows 1243 deletions; the file is corrupt
+  6. Recovery requires `git show HEAD:path > /tmp/X` then `cp /tmp/X path`
+     to restore from the last commit, then re-applying changes via Edit
+     tool only.
+
+  **Hard rules to avoid this:**
+  (a) Treat bash + sed/awk/grep-replace as READ-ONLY against any file
+      that tools have touched this session. Use bash for read-only
+      diagnostics (`grep`, `git diff`, `git show`, `wc`, `head`, `tail`).
+  (b) For destructive line-range deletions across hundreds of lines,
+      write a Python script that does the surgery via string-anchor
+      matching (NOT line numbers), and run it via bash. The string
+      anchors are stable across stale-FUSE views; line numbers are not.
+  (c) Always verify post-write via Read tool, not bash `cat`. If Read
+      and bash disagree on file length, Read is truth.
+  (d) When in doubt, `git show HEAD:path > /tmp/path.head` to capture
+      the last-known-good state at the start of the session — gives a
+      one-command recovery path if anything later corrupts.
+
+  Caught wave-7 UI sprint, lost ~30 min of session time before recovery;
+  banked as a hard convention so the next sprint that mixes Python
+  helper-script transformations with Edit-tool surgery doesn't stumble
+  into the same pit.
 - **`recto apply` defaults `Application` to bare `python.exe` if
   `--python-exe` isn't passed.** When applying a YAML against a
   Recto-managed service, `recto apply`'s diff proposes changing NSSM's

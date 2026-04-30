@@ -7,6 +7,48 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Polish — Mock bootloader operator UI front-end design closed (2026-04-30)
+
+After Wave 9 part 2 landed and the test device smoke validated all 20
+coin / credential types end-to-end, the operator UI's layout was
+revisited and closed out as a stable design point. Five distinct polish
+commits sequenced through the day:
+
+1. **EVM chain selector** for the three ETH queue endpoints (mainnet /
+   Base / Polygon / Arbitrum / Optimism / BNB / Avalanche + 2 testnets),
+   replacing the hardcoded "Base 8453" default. `localStorage`
+   persistence so the operator's chain pick survives the 3s
+   auto-refresh.
+2. **`_rectoChainRestored` flag** to scope the localStorage restore to
+   page-load only -- earlier version restored on every onchange and
+   snapped the dropdown back when the operator picked a different
+   chain.
+3. **Operator-UI section boxes** -- two tinted panels (`Identity &
+   Access` and `Crypto Tokens`) grouping the 14 queue buttons into
+   findable categories. Taller buttons, gap spacing.
+4. **2x2 top grid** -- `Bootloader info` / `Pairing codes` /
+   `Registered phones` / `Pending requests` arranged as a fixed grid
+   so the page never re-flows when content lengths change. Per-panel
+   `overflow-y: auto` keeps the grid stable.
+5. **Layout flip** (this commit) -- Recent responses + Recent requests
+   each promoted to full-width `log-panel-wide` (22rem fixed height),
+   while Provisioned TOTP aliases + Issued JWT capabilities moved into
+   a 2-column `log-grid` (14rem fixed height). Smoke-test discovery:
+   recents entries are multi-line (timestamp + verb + recovered address
+   + full rsv hex) and want horizontal width; TOTP/JWT entries are 1-2
+   lines and fit comfortably in narrow columns.
+
+Smart-skip auto-refresh logic remains -- the 3s reload still drives
+"something just landed in the queue" feedback, but skips when the
+active element is a SELECT / INPUT / TEXTAREA or when any non-empty
+text selection is active, so dropdown picks and copy/paste workflows
+aren't kicked.
+
+Design captured in ARCHITECTURE.md's 2026-04-30 entry. Future coin/
+credential additions slot into the existing structure (button into
+the matching section box, render arm into the Pending Requests panel,
+response row into Recent Responses) without further layout work.
+
 ### Added — Wave 9 part 2: TRON C# phone-side (2026-04-30)
 
 Closes the loop on Wave 9. Wave 9 part 1 (Python verifier + protocol

@@ -796,7 +796,75 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Wave 9: TRON — parts 1 + 2 SHIPPED 2026-04-30; iPhone smoke VALIDATED 2026-04-30; coverage 20/21 (95.2%) hardware-proven
+## Active sprint — none; Wave 9 closed 2026-04-30, next pick is operator's call (auto-unpair vs Wave 10)
+
+Wave 9 (TRON) is fully closed: Python verifier + protocol DTOs landed
+in part 1, C# phone-side landed in part 2, iPhone smoke validated all
+20 of 21 target coins on real hardware, and the mock bootloader
+operator-UI front-end design was stabilized in a 5-step polish
+sequence that closed end-of-day (full detail in CHANGELOG.md
+`[Unreleased]` and ARCHITECTURE.md's 2026-04-30 entry).
+
+**Next sprint candidates** -- two clean directions, both unblocked:
+
+1. **Auto-unpair investigation** (small, surgical, banked from
+   2026-04-30 full-coin-family smoke). After ETH typed_data approval
+   the phone self-unpairs; the signature itself succeeds (bootloader
+   records the verified response before the unpair fires) but the
+   next polling-loop iteration's `TaskCanceledException` ends with
+   the phone reverting to "Not paired yet". Phone-side bug only --
+   other card types unaffected. Repro is tight: queue ETH typed_data
+   after pairing, approve on phone, watch the next GET
+   `/v0.4/pending`. Two leading hypotheses to test in order: (a) the
+   post-approve render path disposes the page component, cancels the
+   polling loop's CancellationToken, and some catch path wrongly
+   interprets cancellation as "phone has been revoked, clear local
+   state"; (b) `ApproveEthTypedDataAsync` has a kind-specific cleanup
+   branch that wrongly clears pairing state. Estimated ~1 hour to
+   diagnose + ship; small enough to roll into a follow-on Wave 10
+   start the same session.
+
+2. **Wave 10 — Cardano (ADA)** to close the 21st coin and hit 100%
+   coverage on the target list. Cardano's derivation is non-trivial:
+   ed25519 with Cardano's custom SLIP-23 / CIP-1852 hardened-key
+   tweak (NOT plain SLIP-0010 like SOL/XLM/XRP, NOT plain BIP-32 like
+   ETH/BTC). Address is bech32 with HRP `addr` for mainnet / `addr_test`
+   for testnet, payment + stake credentials concatenated. Sister
+   implementation pattern of Waves 6/7/8/9: Python verifier + protocol
+   DTOs first (~1 day with the SLIP-23 derivation as the meaty piece),
+   then C# phone-side (mirror of Wave 8's ed25519-trio pattern,
+   reuses `Slip10.cs` derivation primitives that need to extend to
+   the Cardano variant). Estimated 2-3 sessions end-to-end including
+   smoke validation.
+
+**Cross-wave priorities still unblocked** (unchanged from Wave 9
+closure, ranked by leverage now that coin coverage is at 95.2%):
+- **Capability-JWT scope semantics for agent signing** -- the
+  AllThruitCoin Phase 5 unlock; lets agent-script features sign
+  on-chain on behalf of operators within scoped caps. Substantial
+  design work (~1 sprint to finalize the JWT claim shape, another to
+  ship the bootloader-side enforcement). Strategic moat for the
+  Web3-AI-agent direction described in ARCHITECTURE.md's 2026-04-27
+  entry.
+- **Mnemonic export ceremony** -- biometric-gated one-time-display
+  UI so operators can back up the 24 words. ~1 day. Currently the
+  vault has no operator-facing recovery path; this closes the gap.
+- **Mnemonic import ceremony** -- paste an existing mnemonic (e.g.
+  from a Ledger recovery phrase). ~1 day, sister to export.
+- **Multi-account picker** -- Settings page listing every address
+  derived so far. ~1 day; UI-only on top of the existing
+  `m/44'/{coin}'/0'/0/N` derivation chain.
+- **PSBT (BIP-174) signing** -- Bitcoin transaction signing. Larger
+  than mnemonic UIs (~1 sprint); BTC-family-only.
+- **Friendlier `OSStatus -25293` translation** in
+  `Platforms/iOS/IosSecureEnclaveKeyService.cs` catch path -- emit
+  "Set up a device passcode and Face ID in iOS Settings before
+  pairing" instead of dumping the raw OSStatus to the operator. ~1
+  hour. Open TODO banked from wave-7 iPhone-11 smoke.
+
+---
+
+## Prior sprint — Wave 9: TRON — parts 1 + 2 SHIPPED 2026-04-30; iPhone smoke VALIDATED 2026-04-30; coverage 20/21 (95.2%) hardware-proven
 
 Wave 9 follows the Wave 6/7/8 split pattern: Python verifier
 + protocol DTOs landed first (commit earlier today), C# phone-side

@@ -331,6 +331,74 @@ substrate's scope. Operators planning their own native-asset launch
 should track those design decisions in their own product's
 documentation, not in Recto's.
 
+### 2026-04-30 — Mock bootloader operator-UI front-end design stabilized
+
+The mock bootloader (`phone/RectoMAUIBlazor/dev-tools/mock-bootloader.py`)
+exists to give phone-side development a server endpoint that simulates a
+real Recto launcher: it accepts pairings, queues `PendingRequest`s,
+verifies envelope signatures on respond, and shows the operator what
+came through. After Waves 6 / 7 / 8 / 9 added five coin families on top
+of the original `single_sign` / TOTP / WebAuthn / JWT / PKCS#11 / PGP
+credential surface, the operator UI's information density grew past
+what the original "stack everything top-to-bottom" layout could carry
+without page jumps and lost copy/paste state. The 2026-04-30 sprint
+closed out the front-end design.
+
+The settled shape:
+
+- **Top half — fixed 2x2 grid** for the four operator-actionable
+  panels: `Bootloader info`, `Pairing codes`, `Registered phones`,
+  `Pending requests`. Each panel is independently scrollable when its
+  content overflows; the grid itself never moves so the operator's
+  eye holds a stable target during the 3s auto-refresh.
+- **Action buttons grouped into two section boxes** — `Identity &
+  Access` (TOTP / WebAuthn / JWT / PKCS#11 / PGP) and `Crypto Tokens`
+  (single_sign / ETH / BTC family / ed25519 family / TRON). Each
+  section has its own light tint + border so the operator can find the
+  category at a glance instead of scanning a flat 14-button row.
+- **EVM chain selector** (Ethereum / Base / Polygon / Arbitrum /
+  Optimism / BNB / Avalanche / Sepolia / Base Sepolia) sits inside
+  the Crypto Tokens box, right above the three ETH queue buttons.
+  `localStorage` persistence with a `_rectoChainRestored` flag so the
+  selection survives auto-refresh without snapping back when the
+  operator picks a different chain mid-session.
+- **Bottom half — TWO full-width log panels** for `Recent responses`
+  + `Recent requests`, each with a fixed 22rem height and internal
+  scroll. These entries are multi-line (timestamp + service/secret +
+  verb + recovered address + full rsv hex), so horizontal width matters
+  more than vertical. Above them, a 2-column row for `Provisioned TOTP
+  aliases` + `Issued JWT capabilities` with a shorter 14rem fixed
+  height — those entries are 1-2 lines each and fit comfortably in
+  narrow columns.
+- **Smart-skip auto-refresh** that respects focus and text selection.
+  The 3s `setInterval` reload skips when the active element is a
+  SELECT / INPUT / TEXTAREA or when there's any non-empty text
+  selection, so dropdown picks and copy-paste workflows survive.
+
+The 3s auto-refresh interval is the operator's only feedback channel
+for "something just landed in the queue," which is why it's preserved
+despite the cost in mid-interaction friction; the smart-skip logic
+keeps that cost bounded. Fixed-height + `overflow-y:auto` on every
+log panel means the page itself never re-flows during the refresh —
+only the per-panel internal scrollbars move when new entries arrive.
+
+This design is stabilized for the mock bootloader's role as a dev-
+tooling smoke harness. The real production bootloader (the Recto
+launcher's admin UI) is a separate v0.2+ surface with different
+constraints (real users, real auth, no auto-refresh — operators
+manually refresh) and will not inherit this design directly. The
+shared inheritance is the section-box pattern + the per-panel
+fixed-height + scroll discipline, both of which generalize.
+
+Trade-off accepted: the operator UI is now layout-stable across
+every coin / credential type the bootloader supports through Wave 9,
+and the design will scale to Wave 10 (Cardano) without further
+restructure — Cardano's queue button slots into the Crypto Tokens
+box's existing button grid, its render arm slots into the Pending
+Requests panel's switch, its response row slots into the Recent
+Responses log. No layout-level change required for any future coin
+that follows the established protocol shape.
+
 ## The service-config YAML schema
 
 The `apiVersion: recto/v1` shape is locked. Fields are additive after v0.1; no removals without two-minor-version deprecation.

@@ -112,6 +112,38 @@ class FakeNssmClient:
     def reset(self, service: str, field: str) -> None:
         self.reset_calls.append((service, field))
 
+    def get(self, service: str, field_name: str, *subparams: str) -> str:
+        """Mirror the production NssmClient.get() interface so callers
+        like _detect_user_objectname_mismatch() (which reads ObjectName
+        per-service to detect SYSTEM-vs-user CredMan mismatches) can
+        exercise their code path through tests. Compound parameters
+        like AppExit / AppEvents take subparams; the simple flat
+        parameters used in tests don't.
+
+        Reads from the NssmConfig snapshot the fake was constructed
+        with; falls back to "" for any field the snapshot doesn't
+        explicitly carry, mirroring NssmClient's behavior of returning
+        empty string for unset parameters."""
+        if self.not_installed:
+            raise NssmNotInstalledError("nssm.exe missing")
+        if self.not_found or self.config is None:
+            raise NssmServiceNotFoundError(f"{service!r} not found")
+        # Map common flat fields off the NssmConfig dataclass. The fake
+        # only needs to cover what tests actually read; production
+        # NssmClient handles the full surface via subprocess.
+        flat_field_map = {
+            "Application":         self.config.app_path,
+            "AppPath":             self.config.app_path,  # legacy name for the same field
+            "AppParameters":       self.config.app_parameters,
+            "AppDirectory":        self.config.app_directory,
+            "DisplayName":         getattr(self.config, "display_name", "") or "",
+            "Description":         getattr(self.config, "description", "") or "",
+            "ObjectName":          getattr(self.config, "object_name", "") or "",
+            "Start":               getattr(self.config, "start_type", "") or "",
+            "AppEnvironmentExtra": "\r\n".join(self.config.app_environment_extra),
+        }
+        return flat_field_map.get(field_name, "")
+
 
 def _capture() -> tuple[io.StringIO, io.StringIO]:
     """Return (stdout_buf, stderr_buf)."""

@@ -11,15 +11,15 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First time the v0.5+ iOS Secure-Enclave code paths ran against real
 hardware. Closes the "real-iPhone deploy validation" gate that was
-the last open item in the MAC-side pivot before Wave 8.
+the last open item in the macOS-side pivot before Wave 8.
 
-**Test device.** iPhone 11 (UDID-registered in the developer
-provisioning profile) running iOS 17.1.1, deployed via
+**Test device.** the test device (UDID-registered in the developer
+provisioning profile) running iOS 17.x, deployed via
 `dotnet publish -f net10.0-ios -c Release -r ios-arm64` +
-`xcrun devicectl device install` from a Mac mini build host under
+`xcrun devicectl device install` from a the macOS host mini build host under
 an Apple Developer Program account (Team ID-bound certs +
-provisioning profile). The original plan was an iPhone 7 capped
-at iOS 15.8.x; pivoted to iPhone 11 when that turned out to be
+provisioning profile). The original plan was an a legacy iPhone capped
+at iOS 15.x; pivoted to the test device when that turned out to be
 the available unit. `Recto.csproj`'s
 `SupportedOSPlatformVersion=15.0` continues to work — the iOS-17
 device is well above the floor.
@@ -74,7 +74,7 @@ hardware. **Wave 8 unblocked** (TRON + XRP + SOL + XLM → 20 of
 
 **TLS path validation deferred.** Cleartext smoke tests proved
 every signature path works end-to-end against the LAN-bound
-mock bootloader (NSAllowsLocalNetworking exempts 10.0.0.x from
+mock bootloader (NSAllowsLocalNetworking exempts the local LAN range from
 ATS). Mock-self-signed-cert TLS adds cert-trust-on-iPhone friction
 without exercising any new code in the phone-side crypto, the
 verifier, or the comms protocol. Real TLS validation lands when
@@ -281,7 +281,7 @@ the unsigned `transaction_hash_eip1559`). Operator UI shows
 verifying without external tooling.
 
 **Coverage unlocked.** 8 of the 21 top-by-market-cap coins
-on Erik's target list now sign through Recto:
+on the operator's target list now sign through Recto:
 - ETH + L2 family (mainnet, Base, Optimism, Arbitrum, etc.)
 - BNB Smart Chain (BNB)
 - AVAX C-chain (AVAX)
@@ -535,7 +535,7 @@ tree.
 - **Real-iPhone validation** — every line of wave-4 code is
   cross-platform and runs identically on iOS, but a real-device
   build pass would catch any platform-specific gotchas with
-  `SecureStorage` Keychain semantics. Pending the iPhone 7
+  `SecureStorage` Keychain semantics. Pending the a legacy iPhone
   charge + Xcode 26.3 DeviceSupport question.
 
 ### Added — Ethereum credential-kind phone-side signing service + Home.razor approval UI (sprint third wave 2026-04-28)
@@ -571,7 +571,7 @@ prefix + Keccak), `AddressFromPublicKey` (last 20 bytes of pub-Keccak as
 ECDSA + low-s canonicalization + v-recovery via try-recId-0-then-1),
 `RecoverPublicKey` (SEC1 §4.1.6 recovery from `(msg_hash, r, s, v)`).
 ~250 LOC, no platform-specific code, works identically across Windows /
-Mac Catalyst / iOS Simulator / iOS device / Android — anywhere
+the macOS host Catalyst / iOS Simulator / iOS device / Android — anywhere
 BouncyCastle.Cryptography compiles.
 
 **`MauiEthSignService` impl in `Recto/Services/`.** `SecureStorage`-backed
@@ -621,7 +621,7 @@ to exercise the flow end-to-end, and pins the contract with 23
 new tests. Phone-side `IEthSignService` (BIP39 mnemonic +
 BIP32/BIP44 derivation + secp256k1 sign) is still the next
 session's work — that side needs a real-Apple-hardware build pass
-gated on the Mac-side host. The Python tier is now a stable
+gated on the macOS-side host. The Python tier is now a stable
 target the phone-side can develop against.
 
 **`PendingRequest.new_eth(...)` constructor + 7 ETH context
@@ -699,7 +699,7 @@ capability-JWT scope semantics for agent signing (target
 contract, method selector, value cap, gas cap, expiry — enforced
 server-side before the digest is produced). The protocol contract
 + Python verifier surface + mock-bootloader exerciser are stable
-enough for the phone-side team (next-session-Claude on MAC) to
+enough for the phone-side team (next-session-Claude on the macOS host) to
 develop against in isolation.
 
 ### Added — Ethereum credential-kind groundwork (sprint in flight 2026-04-28)
@@ -711,7 +711,7 @@ Phone-side signing implementation (BIP39 mnemonic + BIP32/BIP44
 derivation + secp256k1 sign with v-recovery + Home.razor approval UI)
 is the next session's work — those bits live in the MAUI Blazor
 project under `phone/` and need a build-and-test pass on real Apple
-hardware which is gated on a separate Mac-side host.
+hardware which is gated on a separate macOS-side host.
 
 **`recto secrets set <service> <name>` (and `delete`).** Backend-
 agnostic CLI commands for installing / removing secrets in any
@@ -980,7 +980,7 @@ with a "would send" stub pending the credential ceremony.
   prompt + UIApplication.RegisterForRemoteNotifications with the
   device-token bytes hex-encoded; AppDelegate forwards the
   RegisteredForRemoteNotifications callback to a static helper that
-  resolves any pending fetch); `NoOpPushTokenService` (Windows / Mac
+  resolves any pending fetch); `NoOpPushTokenService` (Windows / the macOS host
   Catalyst dev hosts return null cleanly).
 - **`RegistrationRequest`** extended with optional `PushToken` +
   `PushPlatform` fields. Pairing flow fetches the token before
@@ -1296,7 +1296,7 @@ for the wire shapes.
 - **`Recto.Shared.Services`**: new `ITotpService` (Provision / Exists /
   Generate / Delete) and `TotpCodeCalculator` (pure-math RFC 6238
   implementation, HMAC-SHA1/256/512, RFC 4648 base32 decoder). Pure-
-  managed; runs identically on iOS / Android / Windows / Mac targets.
+  managed; runs identically on iOS / Android / Windows / the macOS host targets.
 - **`Recto.Services.MauiTotpService`**: SecureStorage-backed impl &mdash;
   TOTP secrets stored as JSON (secret_b32 + period + digits + algorithm)
   under `recto.phone.totp.{alias}`. Same OS keychain that holds
@@ -1453,7 +1453,7 @@ at the repo root.
   to the protocol's 32-byte raw form.
 - **DI plumbing.** `MauiProgram.cs` uses `#if IOS / #elif ANDROID /
   #else` to pick the right impl per target framework; iOS gets the
-  Secure Enclave service, Android gets StrongBox, Windows / Mac
+  Secure Enclave service, Android gets StrongBox, Windows / the macOS host
   Catalyst dev hosts keep the `SoftwareEnclaveKeyService`
   (BouncyCastle Ed25519) as the dev-loop backing.
 - **Platform manifests.** iOS `Info.plist` adds

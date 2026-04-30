@@ -33,7 +33,7 @@ read-pass back to the user.
 4. **`ARCHITECTURE.md`** — design doc covering YAML schema, pluggable
    secret-source backends, NSSM relationship, threat model.
 5. **`ROADMAP.md`** — phasing: what's shipped, what's next, what's deferred.
-6. **`docs/MAC-SETUP.md`** if the operator is on a Mac host running
+6. **`docs/macos-setup.md`** if the operator is on a the macOS host host running
    the MAUI Blazor phone app or a self-hosted GitHub Actions
    runner — covers iOS device deploy, the Apple Developer Program
    ceremony, the macOS pytest-on-self-hosted-runner workflow, and
@@ -74,7 +74,7 @@ in the operator's private memo.
    Never push under a generic AI handle (e.g. "Claude AI"). The git
    config (name + email) for AI-driven commits lives in the operator's
    `local.md` private memo; load it before committing. Operators are
-   free to use a persona name for their AI collaborator (e.g. "Darwin",
+   free to use a persona name for their AI collaborator (e.g. "the staging host",
    "Athena", whatever they prefer) but the identity must be set
    explicitly per-machine, not assumed.
 8. **No internal-detail leaks in committed files.** Operator-specific
@@ -121,9 +121,9 @@ in the operator's private memo.
     is the conventional default.
 
     **Persona identity defaults to `darwincommits` /
-    `darwinsemailinbox@gmail.com` baked into the script.** The Darwin
+    `darwinsemailinbox@gmail.com` baked into the script.** The the staging host
     persona is the standing identity for AI-authored commits across
-    every Erik-owned repo (Recto, AllThruit, Verso, AllThruitCoin); each
+    every the operator-owned repo (Recto, AllThruit, Verso, AllThruitCoin); each
     `git_push.ps1` declares them as `param([string]$DarwinName  =
     "darwincommits", [string]$DarwinEmail = "darwinsemailinbox@gmail.com")`
     so the operator can run `.\git_push.ps1` with zero arguments and the
@@ -406,7 +406,7 @@ in `%USERPROFILE%\private\local.md`.
   separate concerns:
   (a) Apple Developer Program — issues code-signing certs +
       provisioning profiles, scoped by Team ID + Bundle ID + UDID.
-      Lives on the build host (the Mac running Xcode / dotnet
+      Lives on the build host (the the macOS host running Xcode / dotnet
       publish). Lets the build host install apps to a device whose
       UDID is registered in the profile.
   (b) iCloud account on the phone — runs Photos / Messages / App
@@ -523,8 +523,8 @@ read that file in addition to this one.
   expected default for any new secret going forward.
 
 - **First real-iPhone deploy + Secure Enclave smoke tests 2026-04-29.**
-  iPhone 11 running iOS 17.1.1, deployed via `dotnet publish` +
-  `xcrun devicectl device install` from a Mac mini build host under
+  the test device running iOS 17.x, deployed via `dotnet publish` +
+  `xcrun devicectl device install` from a the macOS host mini build host under
   an Apple Developer Program account (Team ID-bound provisioning
   profile registering the device UDID). Pairing screen reported
   `signing algorithm: ecdsa-p256`, confirming the
@@ -545,14 +545,14 @@ read that file in addition to this one.
 
 ## Active sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — parts 1 + 2 SHIPPED 2026-04-29; iPhone smoke + cross-wallet interop next
 
-Goal: maximize coin throughput per sprint window. Erik's target
+Goal: maximize coin throughput per sprint window. the operator's target
 list is 21 coins; XMR / ZCASH / CC explicitly skipped (privacy-by-
 design or institutional-architecture mismatch with Recto's
 self-custody model). Wave-by-wave plan ordered by leverage:
 chains that share infrastructure unlock multiple coins per wave.
 
 **Coverage state entering this sprint: 16 of 21 top coins** signing
-through Recto, validated end-to-end on iPhone 11 hardware
+through Recto, validated end-to-end on the test device hardware
 (2026-04-29). Wave 8 part 1 (Python verifier + protocol DTOs)
 landed today, putting ed25519-trio coverage at the protocol layer;
 part 2 (phone-side C# signing) plus iPhone smoke tests close the
@@ -565,10 +565,10 @@ dated CHANGELOG entries:
   transaction (2026-04-29). Unlocked 8 EVM-family coins.
 - **Wave 7** — Bitcoin family extension (LTC + DOGE + BCH) via
   `btc_coin` discriminator (2026-04-29). +3 coins.
-- **MAC-side pivot** — macOS pytest CI on GitHub-hosted runners +
+- **macOS-side pivot** — macOS pytest CI on GitHub-hosted runners +
   iOS device deploy ceremony (2026-04-29). Unblocked iPhone smoke
   tests.
-- **iPhone 11 smoke tests** — first time the v0.5+ Secure-Enclave
+- **the test device smoke tests** — first time the v0.5+ Secure-Enclave
   code paths ran on real hardware. All five coin families approved
   end-to-end. Architectural bet validated.
 
@@ -712,7 +712,7 @@ each derives at its own curve / path tree.
 
 **Coverage now**: 19 of 21 target coins (90.5%). Past the 80% gate
 that was holding the cross-wave priorities below. Cross-wallet
-interop pinning + iPhone smoke tests follow once Erik can verify
+interop pinning + iPhone smoke tests follow once the operator can verify
 mnemonic-derived addresses against Phantom (SOL), Stellar Lab
 (XLM), and Xumm (XRP).
 
@@ -810,12 +810,12 @@ bootloader operator UI for queueing typed-data + transaction
 requests, address-recovery on the verify side. EVM chain-id
 constants live in a single `EvmChain` enum mirrored Python ↔ C#.
 
-### MAC-side pivot — macOS pytest CI + iOS device deploy (2026-04-29)
+### macOS-side pivot — macOS pytest CI + iOS device deploy (2026-04-29)
 
 Recto's test + deploy surface expanded to cover macOS end-to-end:
 
   1. **macOS pytest CI** via GitHub-hosted `macos-latest` runners
-     in `.github/workflows/test-mac.yml`. The substrate is a public
+     in `.github/workflows/test-the macOS host.yml`. The substrate is a public
      OSS repo, and self-hosted runners on public repos are an
      attack vector (any fork can submit a PR with a malicious
      workflow that executes on the runner — documented
@@ -827,11 +827,11 @@ Recto's test + deploy surface expanded to cover macOS end-to-end:
      `test_secrets_credman` / `test_secrets_dpapi_machine`
      "Windows only" reverse-gates, `test_adminui` SO_REUSEADDR
      semantics).
-  2. **iOS device deploy** stayed Mac-local because it needed a
+  2. **iOS device deploy** stayed macOS-host-local because it needed a
      physical iPhone connected via USB — GitHub-hosted runners
      can't do that. Apple Developer Program ceremony (Team
      ID-bound certs + provisioning profile registering the
-     device's UDID) on a Mac mini build host, manual
+     device's UDID) on a the macOS host mini build host, manual
      `dotnet publish -f net10.0-ios -c Release -r ios-arm64`
      + `xcrun devicectl device install`. Activated the
      `Platforms/iOS/IosSecureEnclaveKeyService.cs` Secure-Enclave
@@ -842,7 +842,7 @@ Recto's test + deploy surface expanded to cover macOS end-to-end:
 `SupportedOSPlatformVersion=15.0`. Bundle ID is
 `app.recto.phone`; APNs entitlement is wired in
 `Platforms/iOS/Entitlements.plist`. Setup runbook in
-`docs/MAC-SETUP.md` (Part A: zero MAC setup needed, just trigger
+`docs/macos-setup.md` (Part A: zero the macOS host setup needed, just trigger
 the workflow; Part B: iOS deploy ceremony).
 
 **Lesson banked from the self-hosted runner false-start:** never
@@ -855,12 +855,12 @@ public-repo CI; reach for self-hosted only when a private repo
 unique hardware unavailable to GitHub-hosted (e.g., iOS device
 deploy with a connected iPhone).
 
-### iPhone 11 smoke tests — first real-hardware validation (2026-04-29)
+### the test device smoke tests — first real-hardware validation (2026-04-29)
 
 First time the v0.5+ iOS Secure-Enclave code paths ran against
-real hardware. Test device was an iPhone 11 running iOS 17.1.1
-(original plan was iPhone 7 capped at iOS 15.8.x; pivoted to
-iPhone 11 when that turned out to be the available unit).
+real hardware. Test device was an the test device running iOS 17.x
+(original plan was a legacy iPhone capped at iOS 15.x; pivoted to
+the test device when that turned out to be the available unit).
 `SupportedOSPlatformVersion=15.0` continues to work — the iOS-17
 device is well above the floor.
 
@@ -890,7 +890,7 @@ gate closed; Wave 8 unblocked.
 
 TLS path validation deferred — cleartext smoke tests proved every
 signature path works end-to-end against the LAN-bound mock
-bootloader (`NSAllowsLocalNetworking` exempts 10.0.0.x from ATS).
+bootloader (`NSAllowsLocalNetworking` exempts the local LAN range from ATS).
 Mock-self-signed-cert TLS adds cert-trust-on-iPhone friction
 without exercising any new crypto code; real TLS validation lands
 when Recto deploys behind a real Cloudflare Tunnel cert (already
@@ -951,7 +951,7 @@ one-mnemonic-two-coins integration test.
 served truncated views of edited files (server.py at 520 lines
 mid-line, pyproject.toml at 103 lines mid-section) even after
 fresh tmp copies. The Read tool consistently saw the correct
-Windows-side state. Validation deferred to Erik's Windows pytest
+Windows-side state. Validation deferred to the operator's Windows pytest
 run; cannot be run from sandbox until FUSE refresh.
 
 ---

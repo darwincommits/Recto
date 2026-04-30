@@ -1,6 +1,6 @@
-# MAC-side setup for Recto
+# macOS-side setup for Recto
 
-Recto's Mac mini host plays one substantive role for this repo:
+Recto's the macOS host mini host plays one substantive role for this repo:
 
 **iOS deploy host** — builds and deploys the MAUI Blazor app to
 real iPhone hardware via Xcode + the Apple Developer Program
@@ -17,7 +17,7 @@ any fork can submit a PR with a malicious workflow that executes
 on your runner. Recto's macOS CI now uses GitHub-hosted
 `macos-latest` runners, which are free for public repos,
 ephemeral, and require zero machine-side setup. See
-`.github/workflows/test-mac.yml`. iOS deploy stays MAC-local
+`.github/workflows/test-the macOS host.yml`. iOS deploy stays macOS-host-local
 because it needs your physical iPhone connected via USB —
 GitHub-hosted runners can't do that.)
 
@@ -29,11 +29,11 @@ whichever applies.
 
 ---
 
-## Part A — pytest CI (no MAC-side setup needed)
+## Part A — pytest CI (no macOS-side setup needed)
 
-`.github/workflows/test-mac.yml` runs the test suite on every push
+`.github/workflows/test-the macOS host.yml` runs the test suite on every push
 to main and every PR via GitHub-hosted `macos-latest` runners.
-You don't need to register anything on MAC for this to work — it's
+You don't need to register anything on the macOS host for this to work — it's
 fully managed by GitHub Actions.
 
 To trigger a run manually: GitHub UI → Actions tab → "Test on
@@ -51,19 +51,19 @@ DPAPI + SO_REUSEADDR semantics on adminui.
 Validates the iOS build path that has the `IosSecureEnclaveKeyService`
 + APNs integration written but never run on real hardware.
 
-### One-time prerequisites (operator-driven, NOT MAC-Claude)
+### One-time prerequisites (operator-driven, NOT the macOS-side AI assistant)
 
 These touch the Apple Developer Program account and produce
 secrets that must NEVER be committed:
 
 1. **Apple Developer Program enrollment** ($99/yr, per-Apple-ID).
-   Apple ID = the one on MAC's iCloud sign-in.
+   Apple ID = the one on the macOS host's iCloud sign-in.
 
 2. **Apple Development certificate** for code signing.
    - Open Xcode → Settings → Accounts → add your Apple ID
    - Select the team → "Manage Certificates" → "+" →
      "Apple Development"
-   - Cert lands in MAC's Keychain Access under "login".
+   - Cert lands in the macOS host's Keychain Access under "login".
 
 3. **App identifier** registered at
    https://developer.apple.com/account/resources/identifiers
@@ -77,11 +77,11 @@ secrets that must NEVER be committed:
    - Type: iOS App Development
    - App ID: `app.recto.phone`
    - Certificates: select the cert from step 2
-   - Devices: select iPhone 7 (UDID required — see step 5)
+   - Devices: select a legacy iPhone (UDID required — see step 5)
    - Download the `.mobileprovision` file
    - Double-click it; Xcode imports into the system store
 
-5. **iPhone 7 UDID** — connect the phone via USB to MAC, open
+5. **a legacy iPhone UDID** — connect the phone via USB to the macOS host, open
    Xcode → Window → Devices and Simulators → identify the
    "Identifier" field. That's the UDID. Paste it back into the
    developer-portal device list (step 4).
@@ -91,7 +91,7 @@ secrets that must NEVER be committed:
    - Already created and present at
      `phone/RectoMAUIBlazor/dev-tools/.apns-auth-key.p8`
    - File is gitignored; do NOT check in.
-   - Drop into MAC's keychain only if you'll exercise the APNs
+   - Drop into the macOS host's keychain only if you'll exercise the APNs
      wakeup path during this session — push notifications work
      without this if the phone is foregrounded.
 
@@ -142,9 +142,9 @@ Once installed:
 
 1. **Pair the phone with the bootloader.** The mock bootloader at
    `127.0.0.1:8000` won't be reachable from the iPhone — point
-   `IosSecureEnclaveKeyService`'s pairing target at MAC's LAN IP
-   instead (`http://10.0.0.162:8000` if the mock is running on
-   MAC). The TLS pinning service will warn-on-first-trust per
+   `IosSecureEnclaveKeyService`'s pairing target at the macOS host's LAN IP
+   instead (`http://<lan-ip>:8000` if the mock is running on
+   the macOS host). The TLS pinning service will warn-on-first-trust per
    the existing TOFU flow.
 
 2. **Test single_sign approval** — should produce an Ed25519
@@ -167,17 +167,17 @@ Once installed:
    topbar / cards / per-coin badges look broken, screenshot
    and report so we can ship CSS fixes.
 
-### Known iPhone 7 quirks
+### Known a legacy iPhone quirks
 
-- iOS 15.8.x is the ceiling. `Recto.csproj` sets
+- iOS 15.x is the ceiling. `Recto.csproj` sets
   `SupportedOSPlatformVersion=15.0`, so the build deploys
   without a minimum-OS workaround.
 - A6/A7-era Secure Enclave may have different timing
   characteristics than newer devices; per-sign biometric prompts
-  (Touch ID on iPhone 7) take ~300-500ms, longer than Face ID's
+  (Touch ID on a legacy iPhone) take ~300-500ms, longer than Face ID's
   ~150ms on newer devices. UI should not assume sub-200ms biometric
   resolution.
-- iPhone 7 doesn't support iOS 16+ features (Lock Screen widgets,
+- a legacy iPhone doesn't support iOS 16+ features (Lock Screen widgets,
   Live Activities, etc.) — irrelevant for Recto today, but worth
   noting if v0.6+ adds widgets.
 
@@ -185,19 +185,19 @@ Once installed:
 
 ## Operator handoff checklist
 
-When MAC-side Cowork has finished the setup, send this status back
-to Erik (or to HECATE-side Claude via the `/api/comms/send`
+When macOS-side Cowork has finished the setup, send this status back
+to the operator (or to the developer host-side Claude via the `/api/comms/send`
 mechanism):
 
 - [ ] Recto runner registered, status: Idle
-- [ ] `test-mac.yml` workflow run #1 result: passed / failed (link)
+- [ ] `test-the macOS host.yml` workflow run #1 result: passed / failed (link)
 - [ ] Apple Development cert in Keychain: yes / no
 - [ ] Provisioning profile installed: yes / no
-- [ ] iPhone 7 UDID added to provisioning profile: yes / no
+- [ ] a legacy iPhone UDID added to provisioning profile: yes / no
 - [ ] First device deploy: succeeded / failed (paste error)
 - [ ] Single_sign smoke test on device: passed / failed
 - [ ] BTC + ETH sign smoke tests: passed / failed
 - [ ] Dark vault UI rendering on iOS: looks good / needs CSS fix
 
 Anything that fails, paste the exact error or screenshot so
-HECATE-side Claude can write the fix in the next sprint.
+the developer host-side Claude can write the fix in the next sprint.

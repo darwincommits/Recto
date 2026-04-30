@@ -114,7 +114,7 @@ ready for public-domain promotion. Detail in CHANGELOG.md.
   `setUserAuthenticationRequired(true)`, Ed25519, falls back to TEE
   on devices without StrongBox). Multi-algorithm protocol negotiation
   via `supported_algorithms`. Mock bootloader verifies both
-  algorithms. Software impl remains the Windows / Mac Catalyst dev
+  algorithms. Software impl remains the Windows / the macOS host Catalyst dev
   backing.
 - ✓ Round 4 -- Pending sign-request flow end-to-end. New protocol
   DTOs (PendingRequest / PendingRequestContext / RespondRequest /
@@ -203,7 +203,7 @@ ready for public-domain promotion. Detail in CHANGELOG.md.
   (e) **Push notifications scaffolding** -- IPushTokenService with
   Android (FCM via Xamarin.Firebase.Messaging 125.0.1.2), iOS
   (UNUserNotificationCenter + APNs device-token), and no-op
-  (Windows / Mac Catalyst dev) impls. RegistrationRequest carries
+  (Windows / the macOS host Catalyst dev) impls. RegistrationRequest carries
   push_token + push_platform; bootloader stores per-phone, exposes
   `POST /v0.4/manage/push_token` for rotation, calls a `send_push
   _wakeup` stub after every queue handler logging

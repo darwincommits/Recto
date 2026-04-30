@@ -10,10 +10,10 @@
 # gates on CredMan + DPAPI, SO_REUSEADDR semantics on adminui)
 # because the runner IS actually macOS.
 #
-# Self-hosted on MAC stays in the picture for iOS device deploy
+# Self-hosted on the macOS host stays in the picture for iOS device deploy
 # (Apple Developer Program ceremony + xcrun devicectl install to
-# real iPhone hardware) — that's MAC-local manual work, not CI.
-# See docs/MAC-SETUP.md Part B.
+# real iPhone hardware) — that's macOS-host-local manual work, not CI.
+# See docs/macos-setup.md Part B.
 
 name: Test on macOS
 

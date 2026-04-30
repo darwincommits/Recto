@@ -7,6 +7,73 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — BIP-137 header byte now dispatches on coin (Wave-7 retroactive, 2026-04-30)
+
+Smoke test of all 16 credential kinds on the test device (the test device
+running iOS 17.x, against the macOS host's mock bootloader at 10.0.0.162:8000)
+surfaced three operator-UI warnings. All chain signatures verified
+green; the warnings were verifier-side display issues that did NOT
+indicate a crypto regression.
+
+**Bug 1 (real, phone-side)**: BCH and DOGE message_sign approvals
+showed `address recovery failed: <coin> does not support native
+SegWit (P2WPKH); use kind='p2pkh' instead` next to a green
+"chain sig verified" pill. Root cause: `BtcSigningOps.SignCompactBip137`
+in `Recto.Shared` hardcoded the BIP-137 compact-sig header byte to
+`27 + 12 + recId = 39..42` (P2WPKH range) regardless of coin. The
+verifier (`recto.bitcoin.recover_address(coin=...)`) parses the
+header byte to decide what address shape to encode the recovered
+hash160 as, then tries to encode bech32 -- which fails for DOGE and
+BCH because those coins' `bech32_hrp_mainnet` is `None`. BTC + LTC
+worked because both have native SegWit; DOGE + BCH require P2PKH
+compressed (header range 31..34). Wave-7 added LTC + DOGE + BCH on
+top of BTC by sharing the secp256k1 primitive across the family
+and dispatching the preamble per coin -- the sprint's audit caught
+the preamble layer but missed the BIP-137 header-byte layer.
+
+**Fix**: thread `coin` through `SignCompactBip137(msgHash,
+privateKey, coin = "btc")`, look up `GetCoinConfig(coin).DefaultAddressKind`,
+map address kind to header offset
+(`p2pkh-uncompressed`=0, `p2pkh`=4, `p2sh-p2wpkh`=8, `p2wpkh`=12),
+emit `header = 27 + offset + recId`. `MauiBtcSignService` passes
+the coin discriminator through; misleading "header byte is
+coin-agnostic" comment replaced with a comment documenting the
+two-layer dispatch (preamble + header byte) and pointing at the
+new gotcha entry in CLAUDE.md.
+
+**Bug 2 (cosmetic, mock-bootloader-side)**: SOL message_sign
+approvals showed `differs from expected 11111...1112` even though
+the recovered address was correct for the operator's mnemonic at
+`m/44'/501'/0'/0'`. Root cause: `mock-bootloader.py`'s placeholder-
+prefix tuple (`_handle_respond` in `ed_sign` branch) had a 32-ones
+literal `"11111111111111111111111111111111"` for SOL, but the queue
+default uses the System Program pubkey `"11111111111111111111111111111112"`
+(31 ones + a `2`). `startswith()` returned False because char 32
+is `2` not `1`, so the placeholder-suppression branch never fired.
+
+**Fix**: shorten the SOL prefix to 24 ones, matching both the
+"32-ones" and "31-ones-and-a-2" forms. Any real ed25519 pubkey is
+high-entropy enough to never collide with a 24-ones run.
+
+**Tests**: new `[Theory]` `SignCompactBip137_HeaderByteDispatchesOnCoin`
+in `BtcSigningOpsTests` pins per-coin header-byte ranges (BTC + LTC
+expect 39/40, DOGE + BCH expect 31/32) so the next "share the
+primitive across coins" sprint has a unit-test canary for this
+class of bug. Companion `SignCompactBip137_UnknownCoinThrows` pins
+the rejection path. Original `SignCompactBip137_ReturnsP2wpkhHeaderInRange`
+keeps its original assertion (BTC default).
+
+**Files**: `Recto.Shared/Services/BtcSigningOps.cs`,
+`Recto/Services/MauiBtcSignService.cs`,
+`Recto.Shared.Tests/BtcSigningOpsTests.cs`,
+`dev-tools/mock-bootloader.py`. CLAUDE.md gains a new gotcha entry
+("BIP-137 header byte must dispatch on coin").
+
+**Validation pending**: re-deploy phone build to the test device, re-run
+the 16-card smoke against the mock bootloader, confirm all three
+warnings clear (BCH/DOGE address recovered; SOL no longer flags
+"differs from expected").
+
 ### Validated — First real-iPhone deploy + Secure Enclave smoke tests (2026-04-29)
 
 First time the v0.5+ iOS Secure-Enclave code paths ran against real

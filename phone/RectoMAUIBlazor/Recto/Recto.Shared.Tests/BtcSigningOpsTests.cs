@@ -138,9 +138,48 @@ public class BtcSigningOpsTests
         var sig = BtcSigningOps.SignCompactBip137(msgHash, priv);
         Assert.Equal(65, sig.Length);
         // P2WPKH header byte is 39..42 (= 27 + 12 + recovery_id, recId 0..3).
-        // We only emit recIds 0-1, so 39..40 in practice.
+        // We only emit recIds 0-1, so 39..40 in practice. BTC default coin.
         Assert.True(sig[0] is 39 or 40,
-            $"P2WPKH header byte should be 39 or 40, got {sig[0]}.");
+            $"BTC P2WPKH header byte should be 39 or 40, got {sig[0]}.");
+    }
+
+    [Theory]
+    [InlineData("btc",  "Bitcoin Signed Message",  39, 40)]   // P2WPKH (native SegWit)
+    [InlineData("ltc",  "Litecoin Signed Message", 39, 40)]   // P2WPKH (native SegWit)
+    [InlineData("doge", "Dogecoin Signed Message", 31, 32)]   // P2PKH compressed (no SegWit)
+    [InlineData("bch",  "Bitcoin Cash Signed Msg", 31, 32)]   // P2PKH compressed (no SegWit)
+    public void SignCompactBip137_HeaderByteDispatchesOnCoin(
+        string coin, string _scenario, int expectedHi, int expectedLo)
+    {
+        // Wave-7-retroactive regression test (banked 2026-04-30 after the
+        // test device smoke surfaced "address recovery failed: <coin> does not
+        // support native SegWit (P2WPKH); use kind='p2pkh' instead" on
+        // BCH + DOGE while signatures themselves verified). The phone
+        // had been hardcoding the P2WPKH header byte (39..42) regardless
+        // of coin, which encodes "this is a SegWit signature" into the
+        // sig itself; recover_address(coin=...) on the verifier then
+        // tried to encode the recovered hash160 as bech32, which fails
+        // for coins with no bech32 HRP (DOGE, BCH).
+        //
+        // Pin per-coin header-byte ranges so the next time a Wave-7-
+        // style "share the primitive across coins" sprint lands, this
+        // test is the canary that catches the same class of bug.
+        var priv = EthSigningOps.GeneratePrivateKey();
+        var msgHash = BtcSigningOps.SignedMessageHash("hdr byte coin " + coin, coin);
+        var sig = BtcSigningOps.SignCompactBip137(msgHash, priv, coin);
+        Assert.Equal(65, sig.Length);
+        Assert.True(
+            sig[0] == expectedHi || sig[0] == expectedLo,
+            $"coin='{coin}' expected header byte {expectedHi} or {expectedLo}, got {sig[0]}.");
+    }
+
+    [Fact]
+    public void SignCompactBip137_UnknownCoinThrows()
+    {
+        var priv = EthSigningOps.GeneratePrivateKey();
+        var msgHash = BtcSigningOps.SignedMessageHash("unknown coin");
+        Assert.Throws<ArgumentException>(
+            () => BtcSigningOps.SignCompactBip137(msgHash, priv, "xrp"));
     }
 
     [Fact]

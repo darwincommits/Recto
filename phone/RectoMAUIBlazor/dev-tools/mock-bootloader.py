@@ -2476,7 +2476,14 @@ class Handler(BaseHTTPRequestHandler):
                         # one).
                         expected_addr_ed = (pending["context"].get("ed_address") or "").strip()
                         placeholder_prefixes = (
-                            "11111111111111111111111111111111",  # SOL all-zeros
+                            # SOL: queue default uses the System Program
+                            # pubkey "11111...1112" (31 ones + a '2'),
+                            # but a literal 32-zero-bytes pubkey base58s
+                            # to "11111...1111" (32 ones). Match both
+                            # via a 24-ones prefix -- any real ed25519
+                            # pubkey is high-entropy and will never
+                            # collide with this much-ones run.
+                            "111111111111111111111111",
                             "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",  # XLM all-zeros prefix
                             "rPlaceholder",                      # XRP
                         )

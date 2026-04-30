@@ -172,14 +172,21 @@ public sealed class MauiBtcSignService : IBtcSignService
             seed = Bip39.MnemonicToSeed(mnemonic, passphrase: string.Empty);
             leaf = Bip32.DeriveAtPath(seed, derivationPath);
 
-            // Coin-aware: dispatches to the right preamble (BTC/BCH
-            // share Bitcoin's preamble, LTC + DOGE have their own).
-            // The compact-sig header byte is coin-agnostic — same
-            // 27..42 BIP-137 ranges apply across the family because
-            // the verifier on every coin computes recovery the same
-            // way against the coin-specific preimage hash.
+            // Coin-aware on BOTH layers:
+            //   (1) preamble -- SignedMessageHash(message, coin) picks
+            //       the right "X Signed Message:\n" magic per coin
+            //       (BTC/BCH share Bitcoin's; LTC + DOGE have their own).
+            //   (2) BIP-137 header byte -- SignCompactBip137(_, _, coin)
+            //       picks the right address-kind range. P2WPKH (39..42)
+            //       for BTC + LTC; P2PKH compressed (31..34) for DOGE +
+            //       BCH because those coins have no bech32 HRP and the
+            //       verifier would otherwise refuse to encode the
+            //       recovered hash160 as a SegWit address. See the
+            //       "BIP-137 header byte must dispatch on coin" gotcha
+            //       in CLAUDE.md (banked retroactively after wave-7
+            //       smoke on the test device, 2026-04-30).
             var msgHash = BtcSigningOps.SignedMessageHash(message, coin);
-            var compactSig = BtcSigningOps.SignCompactBip137(msgHash, leaf.PrivateKey);
+            var compactSig = BtcSigningOps.SignCompactBip137(msgHash, leaf.PrivateKey, coin);
 
 #if DEBUG
             // Sanity-check breadcrumb in Debug builds. Same pattern as

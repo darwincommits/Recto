@@ -400,20 +400,47 @@ public static class BtcSigningOps
     /// Sign a 32-byte message hash with secp256k1 ECDSA + RFC 6979
     /// deterministic-k. Returns a 65-byte BIP-137 compact signature
     /// (header || r || s). The header byte encodes the recovery id +
-    /// address kind: for P2WPKH default (the only kind we support
-    /// today), <c>header = 27 + 12 + recovery_id</c> = 39..42.
-    /// <c>s</c> is canonicalized to the low-s form per Bitcoin Core's
-    /// signature-acceptance rules.
+    /// address kind per BIP-137 "Header byte values":
+    /// <list type="bullet">
+    /// <item>27..30 = P2PKH uncompressed (legacy)</item>
+    /// <item>31..34 = P2PKH (compressed) -- DOGE, BCH default</item>
+    /// <item>35..38 = P2SH-P2WPKH (nested SegWit)</item>
+    /// <item>39..42 = P2WPKH (native SegWit) -- BTC, LTC default</item>
+    /// </list>
+    /// The verifier reads <c>address_kind</c> back out of the header byte
+    /// to decide what address shape to encode the recovered hash160 as,
+    /// so a BCH/DOGE sig emitted with a P2WPKH header byte will fail
+    /// recovery on the verifier side because those coins have no bech32
+    /// HRP. <c>coin</c> dispatches the header byte's address-kind range
+    /// to match the coin's <c>DefaultAddressKind</c> from
+    /// <see cref="CoinConfigs"/>. <c>s</c> is canonicalized to the low-s
+    /// form per Bitcoin Core's signature-acceptance rules.
     /// </summary>
     /// <param name="msgHash">32-byte hash (e.g. output of <see cref="SignedMessageHash"/>).</param>
     /// <param name="privateKey">32-byte secp256k1 private key.</param>
+    /// <param name="coin">Coin family discriminator -- "btc" / "ltc" / "doge" / "bch". Default "btc".</param>
     /// <returns>65 bytes: <c>header</c> (1) || <c>r</c> (32) || <c>s</c> (32).</returns>
-    public static byte[] SignCompactBip137(byte[] msgHash, byte[] privateKey)
+    public static byte[] SignCompactBip137(byte[] msgHash, byte[] privateKey, string coin = "btc")
     {
         if (msgHash is null || msgHash.Length != 32)
             throw new ArgumentException("Message hash must be 32 bytes.", nameof(msgHash));
         if (privateKey is null || privateKey.Length != 32)
             throw new ArgumentException("Private key must be 32 bytes.", nameof(privateKey));
+
+        // Map the coin's default address kind to the BIP-137 header
+        // offset. The verifier reads this back to pick what address
+        // shape to encode the recovered hash160 as.
+        var cfg = GetCoinConfig(coin);
+        int headerOffset = cfg.DefaultAddressKind switch
+        {
+            "p2pkh-uncompressed" => 0,    // 27..30
+            "p2pkh"              => 4,    // 31..34
+            "p2sh-p2wpkh"        => 8,    // 35..38
+            "p2wpkh"             => 12,   // 39..42
+            _ => throw new ArgumentException(
+                $"Unsupported default address kind '{cfg.DefaultAddressKind}' for coin '{coin}'.",
+                nameof(coin)),
+        };
 
         var d = new BigInteger(1, privateKey);
         var signer = new ECDsaSigner(new HMacDsaKCalculator(new Sha256Digest()));
@@ -441,9 +468,11 @@ public static class BtcSigningOps
             var recovered = EthSigningOps.RecoverPublicKey(msgHash, rsv);
             if (recovered is not null && BytesEqual(recovered, expectedPub))
             {
-                // BIP-137 P2WPKH header byte: 27 + 12 + recId = 39..42.
+                // BIP-137 header byte: 27 + headerOffset + recId.
+                // headerOffset selects the address-kind range
+                // (P2PKH=4, P2SH-P2WPKH=8, P2WPKH=12).
                 var compactSig = new byte[65];
-                compactSig[0] = (byte)(27 + 12 + recId);
+                compactSig[0] = (byte)(27 + headerOffset + recId);
                 CopyFixed32(r, compactSig, 1);
                 CopyFixed32(s, compactSig, 33);
                 return compactSig;

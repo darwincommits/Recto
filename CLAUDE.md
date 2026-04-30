@@ -651,6 +651,68 @@ operator-time on diagnosis.
   string and convert each to a dispatch lookup against the
   discriminator field.
 
+- **BIP-137 header byte must dispatch on coin -- "shared
+  primitive across coins" sprints have to audit every layer
+  where the address kind is encoded, not just the obvious ones.**
+  Wave-7 added LTC + DOGE + BCH on top of BTC by sharing the
+  secp256k1 primitive across the family and dispatching the
+  signed-message preamble per coin. Layer that the sprint
+  caught: `SignedMessageHash(message, coin)` picks the right
+  "X Signed Message:\n" magic. Layer the sprint MISSED: the
+  BIP-137 compact-signature header byte ALSO encodes which
+  address kind the verifier should use to encode the recovered
+  hash160 (BIP-137 "Header byte values"):
+  - 27..30 = P2PKH uncompressed (legacy)
+  - 31..34 = P2PKH compressed
+  - 35..38 = P2SH-P2WPKH (nested SegWit)
+  - 39..42 = P2WPKH (native SegWit)
+
+  Pre-fix, `SignCompactBip137` hardcoded `header = 27 + 12 +
+  recId = 39..42` regardless of coin. BTC + LTC kept working
+  because both have native SegWit (bech32 HRPs `bc` and `ltc`).
+  DOGE + BCH BROKE because their `default_address_kind` is
+  `p2pkh` and they have no bech32 HRP at all -- the verifier's
+  `recover_address(coin=...)` parsed `address_kind="p2wpkh"`
+  out of the header byte, then tried to encode the recovered
+  hash160 as bech32, then raised `<coin> does not support
+  native SegWit (P2WPKH); use kind='p2pkh' instead`.
+
+  Crucially the underlying ECDSA signature itself was VALID
+  on every coin -- the chain-side "verify the secp256k1 sig"
+  check passed -- so the smoke test green-checked the chain
+  signature while the address-recovery branch raised. End
+  result on the operator UI: "approved -- chain sig verified
+  -- address recovery failed: <coin> does not support native
+  SegWit". Looks scary, no real security impact, but if a
+  real verifier (a wallet, a chain explorer) ever tried to
+  derive the signer address from one of these sigs, it would
+  hit the same wall and reject.
+
+  **Fix shape (Wave-7-retroactive, 2026-04-30)**: thread the
+  coin through `SignCompactBip137(msgHash, privateKey, coin)`,
+  look up `cfg.DefaultAddressKind` from the COIN_CONFIG table,
+  map address kind to header offset (`p2pkh-uncompressed=0`,
+  `p2pkh=4`, `p2sh-p2wpkh=8`, `p2wpkh=12`), and emit
+  `header = 27 + offset + recId`. Pin per-coin header-byte
+  ranges in `BtcSigningOpsTests.cs` so a future "share the
+  primitive across coins" sprint that adds (e.g.) Zcash gets
+  the regression caught at unit-test time.
+
+  **Sibling rule with the discriminator-field-outside-try-block
+  gotcha above**: both are "multi-coin primitive must dispatch
+  on the discriminator at every layer where the discriminator
+  matters." The first one is about the response-field LABELING
+  layer; this one is about the SIGNATURE SERIALIZATION layer.
+  Audit checklist when adding a new coin to an existing
+  family: (a) preamble / message format -- usually obvious;
+  (b) address derivation -- usually obvious; (c) signature
+  serialization format -- often hides discriminator-encoded
+  fields (header bytes, version flags, "type" tags) that look
+  shared across the family but actually aren't; (d) verifier
+  re-derivation path -- whatever shape the sig got serialized
+  in must round-trip correctly under the verifier's same-coin
+  parse path.
+
 ### Phone-app gotchas → moved
 
 The MAUI / iOS / Android phone-app gotchas (build / sign / Razor /

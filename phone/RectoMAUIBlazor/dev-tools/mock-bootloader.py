@@ -3270,20 +3270,28 @@ def render_index() -> str:
     gap: 1rem;
     margin: 0.5rem 0 1rem 0;
   }}
+  /* In-grid panel (TOTP aliases + JWT capabilities side-by-side).
+     These two surfaces have lighter content (one or two lines per
+     entry) so a shorter fixed height fits the typical state. */
   .log-panel {{
     border: 1px solid #ccc;
     border-radius: 6px;
     background: #fcfcfc;
     padding: 0.75rem 1rem;
-    height: 28rem;
+    height: 14rem;
     overflow-y: auto;
   }}
+  /* Full-width panel (Recent responses + Recent requests, each its
+     own row). These benefit from horizontal space because each entry
+     is multi-line (timestamp + service/secret + verb + recovered
+     address + full rsv hex on its own line). Taller height so
+     2-3 entries are visible without scroll during a typical smoke. */
   .log-panel-wide {{
     border: 1px solid #ccc;
     border-radius: 6px;
     background: #fcfcfc;
     padding: 0.75rem 1rem;
-    height: 12rem;
+    height: 22rem;
     overflow-y: auto;
     margin: 0.5rem 0 1rem 0;
   }}
@@ -3463,25 +3471,25 @@ _updateEthFormActions();
   returned compact signature and surfaces it for inspection.
 </div>
 
-<div class="log-panel-wide">
-  <h2>Provisioned TOTP aliases</h2>
-  <ul>{totp_provisioned_html}</ul>
-</div>
-
-<div class="log-panel-wide">
-  <h2>Issued JWT capabilities</h2>
-  <ul>{issued_jwts_html}</ul>
-</div>
-
 <div class="log-grid">
   <div class="log-panel">
-    <h2>Recent responses</h2>
-    <ul>{responses_html}</ul>
+    <h2>Provisioned TOTP aliases</h2>
+    <ul>{totp_provisioned_html}</ul>
   </div>
   <div class="log-panel">
-    <h2>Recent requests</h2>
-    <ul>{history_html}</ul>
+    <h2>Issued JWT capabilities</h2>
+    <ul>{issued_jwts_html}</ul>
   </div>
+</div>
+
+<div class="log-panel-wide">
+  <h2>Recent responses</h2>
+  <ul>{responses_html}</ul>
+</div>
+
+<div class="log-panel-wide">
+  <h2>Recent requests</h2>
+  <ul>{history_html}</ul>
 </div>
 
 <script>

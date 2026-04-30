@@ -29,8 +29,10 @@ import hmac
 import ipaddress
 import json
 import os
+import pathlib
 import secrets
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -42,6 +44,22 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+# Auto-locate the Recto repo root so recto.solana / recto.stellar /
+# recto.ripple / recto.bitcoin / recto.ethereum are importable without
+# the operator having to pre-set PYTHONPATH. The mock lives at
+# <repo>/phone/RectoMAUIBlazor/dev-tools/mock-bootloader.py — the repo
+# root is three directories up. Without this, hosts that run the mock
+# from a non-repo-rooted Python (e.g. via a build cache or a
+# PYTHONPATH-stripped wrapper) hit "No module named 'recto'" on every
+# chain-side address-recovery / signature-verify step and operators see
+# "address recovery failed" warnings next to perfectly-valid signatures.
+# Self-locating sidesteps that — the mock now Just Works from any cwd,
+# any Python invocation, as long as the source tree is laid out
+# canonically.
+_repo_root = pathlib.Path(__file__).resolve().parents[3]
+if (_repo_root / "recto").is_dir() and str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 try:
     from cryptography import x509
@@ -2282,6 +2300,19 @@ class Handler(BaseHTTPRequestHandler):
                     extra_response_fields["btc_message_kind"] = pending["context"].get("btc_message_kind")
                     extra_response_fields["btc_address"] = pending["context"].get("btc_address")
                     extra_response_fields["btc_message_text"] = pending["context"].get("btc_message_text")
+                    # Wave-7: Bitcoin-family coin discriminator.
+                    # MUST be set OUTSIDE the recto-import try below,
+                    # because the renderer's per-coin ticker dispatch
+                    # ("BTC" / "LTC" / "DOGE" / "BCH") uses this field
+                    # and we want correct labels even on hosts where
+                    # recto.bitcoin can't be imported. Without this
+                    # hoist, all btc-family rows fall back to the
+                    # "BTC" default ticker and operators see
+                    # "BTC message_signing" next to a Litecoin or
+                    # Dogecoin login — wrong, and not safe to leave
+                    # in production.
+                    coin_btc = pending["context"].get("btc_coin", "btc") or "btc"
+                    extra_response_fields["btc_coin"] = coin_btc
                     # Best-effort signer-address recovery — purely
                     # informational. If recto.bitcoin is on PYTHONPATH
                     # (mock running from inside the Recto checkout),
@@ -2297,10 +2328,6 @@ class Handler(BaseHTTPRequestHandler):
 
                         msg_kind_btc = pending["context"].get("btc_message_kind")
                         network_btc = pending["context"].get("btc_network", "mainnet")
-                        # Wave-7: coin-aware recovery. Defaults to "btc"
-                        # for backward compat. Mirrors C# BtcCoin enum.
-                        coin_btc = pending["context"].get("btc_coin", "btc") or "btc"
-                        extra_response_fields["btc_coin"] = coin_btc
                         if msg_kind_btc == "message_signing":
                             msg_text_btc = pending["context"].get("btc_message_text", "")
                             digest_btc = _btc_msg_hash(msg_text_btc.encode("utf-8"), coin=coin_btc)
@@ -2620,16 +2647,25 @@ def render_index() -> str:
         if kind == "btc_sign":
             msg_kind = r["context"].get("btc_message_kind", "?")
             network = r["context"].get("btc_network", "?")
+            # Wave-7: coin-aware ticker. Dispatches on btc_coin so
+            # LTC / DOGE / BCH pending rows show the correct ticker
+            # instead of all hardcoding "BTC". Default "btc" preserves
+            # backward compat with v0.5 launchers that pre-date the
+            # multi-coin extension.
+            coin_pending = r["context"].get("btc_coin", "btc") or "btc"
+            ticker_pending = {
+                "btc": "BTC", "ltc": "LTC", "doge": "DOGE", "bch": "BCH",
+            }.get(coin_pending, "BTC")
             if msg_kind == "message_signing":
                 msg_text = r["context"].get("btc_message_text", "") or ""
                 preview = msg_text if len(msg_text) <= 64 else msg_text[:61] + "..."
                 return (
-                    f"<span class='dim'>BTC {msg_kind}</span> "
+                    f"<span class='dim'>{ticker_pending} {msg_kind}</span> "
                     f"<code>{network}</code> "
                     f"&mdash; <code>{preview}</code>"
                 )
             return (
-                f"<span class='dim'>BTC {msg_kind}</span> "
+                f"<span class='dim'>{ticker_pending} {msg_kind}</span> "
                 f"<code>{network}</code>"
             )
         if kind == "ed_sign":

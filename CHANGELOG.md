@@ -9,10 +9,10 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed — BIP-137 header byte now dispatches on coin (Wave-7 retroactive, 2026-04-30)
 
-Smoke test of all 16 credential kinds on the test device (the test device
-running iOS 17.x, against the macOS host's mock bootloader at 10.0.0.162:8000)
-surfaced three operator-UI warnings. All chain signatures verified
-green; the warnings were verifier-side display issues that did NOT
+Smoke test of all 16 credential kinds on the test device (running
+iOS 17.x, against the mock bootloader on the macOS host) surfaced
+three operator-UI warnings. All chain signatures verified green;
+the warnings were verifier-side display issues that did NOT
 indicate a crypto regression.
 
 **Bug 1 (real, phone-side)**: BCH and DOGE message_sign approvals
@@ -69,10 +69,28 @@ keeps its original assertion (BTC default).
 `dev-tools/mock-bootloader.py`. CLAUDE.md gains a new gotcha entry
 ("BIP-137 header byte must dispatch on coin").
 
-**Validation pending**: re-deploy phone build to the test device, re-run
-the 16-card smoke against the mock bootloader, confirm all three
-warnings clear (BCH/DOGE address recovered; SOL no longer flags
-"differs from expected").
+**Validated 2026-04-30**: re-deploy + re-smoke on the test device
+landed all three fixes clean. 16/16 cards approved end-to-end, no
+regressions on the previously-passing 13.
+
+- **BCH** now shows `recovered 1LKbeiS7Qy1ESNL8TJYeCr5GmsnidiYhAj`
+  (proper legacy P2PKH form, BCH `version_byte_p2pkh = 0x00` base58s
+  to a `1...` prefix). Previous "address recovery failed: Bitcoin
+  Cash does not support native SegWit" error gone.
+- **DOGE** now shows `recovered D6AZoodY7vmqzJnACqUmJvYKLUA9GkWrCT`
+  (proper Dogecoin P2PKH form, DOGE `version_byte_p2pkh = 0x1E`
+  base58s to a `D...` prefix). Previous "Dogecoin does not support
+  native SegWit" error gone.
+- **SOL** now shows just `(chain sig verified) -- verified` with
+  no amber "differs from expected" warning. Derived address
+  `Bqg5MhnrrSAgEBE4yM4sEyag6KDm8FqWbrWgtt78SboA` matches the
+  operator's mnemonic at `m/44'/501'/0'/0'`.
+
+Closes Wave-7-retroactive. Also closes the iPhone-smoke half of
+Wave 8's remaining validation -- SOL/XLM/XRP rows are now hardware-
+proven on the test device. Cross-wallet interop pinning
+(SOL/Phantom, XLM/Stellar Lab, XRP/Xumm) remains the only thing
+gating full Wave 8 closure.
 
 ### Validated — First real-iPhone deploy + Secure Enclave smoke tests (2026-04-29)
 

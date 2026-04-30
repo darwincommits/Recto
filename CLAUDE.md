@@ -796,7 +796,7 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — parts 1 + 2 SHIPPED 2026-04-29; iPhone smoke + cross-wallet interop next
+## Active sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — parts 1 + 2 SHIPPED 2026-04-29; iPhone smoke VALIDATED 2026-04-30; cross-wallet interop next
 
 Goal: maximize coin throughput per sprint window. the operator's target
 list is 21 coins; XMR / ZCASH / CC explicitly skipped (privacy-by-
@@ -964,10 +964,12 @@ each derives at its own curve / path tree.
   BouncyCastle Ed25519Signer.
 
 **Coverage now**: 19 of 21 target coins (90.5%). Past the 80% gate
-that was holding the cross-wave priorities below. Cross-wallet
-interop pinning + iPhone smoke tests follow once the operator can verify
-mnemonic-derived addresses against Phantom (SOL), Stellar Lab
-(XLM), and Xumm (XRP).
+that was holding the cross-wave priorities below. iPhone smoke
+landed 2026-04-30 -- SOL/XLM/XRP rows hardware-proven on the test
+device alongside the wave-7-retroactive BIP-137 header-byte fix
+(see CHANGELOG.md). Cross-wallet interop pinning is the only
+remaining item: verify mnemonic-derived addresses against Phantom
+(SOL), Stellar Lab (XLM), and Xumm (XRP).
 
 **Wave 9 — TRON (ACTIVE AFTER WAVE 8 part 2).** secp256k1 +
 Keccak-256 + base58 address; close cousin of ETH. Reuses

@@ -3282,7 +3282,23 @@ def render_index() -> str:
 // (same as the CSS rules earlier in the same template).
 function _updateEthFormActions() {{
   var sel = document.getElementById("ethChainSel");
-  var chain = sel ? sel.value : "8453";
+  if (!sel) return;
+  // Persist chain selection across page auto-reloads via localStorage.
+  // The HTML's selected attribute is hardcoded to Base, so without
+  // persistence the dropdown snaps back to Base on every 3s reload.
+  // On load: if a saved value exists, apply it to the dropdown BEFORE
+  // wiring the form actions, so the form-action chain reflects the
+  // restored selection. On change: persist whatever the operator picked.
+  try {{
+    var saved = localStorage.getItem("rectoEthChain");
+    if (saved && sel.value !== saved) {{
+      for (var j = 0; j < sel.options.length; j++) {{
+        if (sel.options[j].value === saved) {{ sel.selectedIndex = j; break; }}
+      }}
+    }}
+    localStorage.setItem("rectoEthChain", sel.value);
+  }} catch (e) {{ /* localStorage unavailable; continue with current value */ }}
+  var chain = sel.value || "8453";
   var ids = ["_formEthPersonalSign", "_formEthTypedData", "_formEthTransaction"];
   var bases = ["/_queue_eth_personal_sign", "/_queue_eth_typed_data", "/_queue_eth_transaction"];
   for (var i = 0; i < ids.length; i++) {{
@@ -3349,7 +3365,26 @@ _updateEthFormActions();
 <h2>Recent requests</h2>
 <ul>{history_html}</ul>
 
-<script>setTimeout(() => location.reload(), 3000);</script>
+<script>
+// Auto-refresh the operator UI every 3s so newly-queued requests +
+// approved responses appear without manual interaction. Smart-skip
+// the reload when the operator is mid-interaction so dropdown
+// selections + text selection survive: skip if the active element
+// is a SELECT / INPUT / TEXTAREA (operator is typing / picking) or
+// if there's any non-empty text selection (operator is mid-copy).
+setInterval(function () {{
+  try {{
+    var ae = document.activeElement;
+    if (ae) {{
+      var tag = (ae.tagName || "").toUpperCase();
+      if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
+    }}
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (sel && sel.toString().length > 0) return;
+  }} catch (e) {{ /* fall through to reload */ }}
+  location.reload();
+}}, 3000);
+</script>
 </body></html>
 """
 

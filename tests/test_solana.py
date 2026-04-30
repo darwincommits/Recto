@@ -18,7 +18,7 @@ Concrete external pins in this file:
 
 Mnemonic-derived address vectors (Phantom / Solflare cross-wallet
 interop) are deferred to wave 8 part 2 once SLIP-0010 derivation
-lands phone-side and Erik can pin a value against a real wallet.
+lands phone-side and the operator can pin a value against a real wallet.
 """
 
 from __future__ import annotations

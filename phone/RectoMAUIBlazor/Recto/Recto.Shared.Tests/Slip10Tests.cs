@@ -25,7 +25,7 @@ namespace Recto.Shared.Tests;
 ///
 /// <para>
 /// Mnemonic-to-known-external-address pinning (Phantom / SEP-0005 /
-/// Xumm cross-wallet interop) is deferred until Erik can verify
+/// Xumm cross-wallet interop) is deferred until the operator can verify
 /// values against real wallets. For now we pin internal consistency
 /// + the structural properties that distinguish SLIP-0010 from BIP-32.
 /// </para>

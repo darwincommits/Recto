@@ -1973,6 +1973,14 @@ class Handler(BaseHTTPRequestHandler):
             # base64-encoded) the phone produced over the BIP-137
             # signed-message hash. Same opaque-forwarding posture as ETH.
             btc_signature_base64 = body.get("btc_signature_base64")
+            # Wave-8 ED25519 chains (SOL / XLM / XRP): raw 64-byte
+            # ed25519 signature base64-encoded + the 32-byte ed25519
+            # public key hex. Both required because XRP addresses are
+            # HASH160s and don't carry the pubkey; SOL/XLM carry it
+            # for protocol uniformity. Same opaque-forwarding posture
+            # as ETH/BTC.
+            ed_signature_base64 = body.get("ed_signature_base64")
+            ed_pubkey_hex = body.get("ed_pubkey_hex")
 
             if not phone_id or not decision:
                 self._send_json(400, {"error": "phone_id and decision are required"})
@@ -2320,6 +2328,140 @@ class Handler(BaseHTTPRequestHandler):
                         # psbt recovery is a follow-up — needs full BIP-174 parse.
                     except Exception as ex:  # noqa: BLE001
                         extra_response_fields["btc_recovery_error"] = str(ex)
+                elif kind == "ed_sign":
+                    # Wave-8 ed25519 chains (SOL / XLM / XRP). Same shape
+                    # as eth_sign / btc_sign: phone derives a 32-byte
+                    # ed25519 seed from its BIP-39 mnemonic at the
+                    # requested SLIP-0010 path, computes the chain-
+                    # specific signed-message hash (preamble varies per
+                    # chain), signs, and returns a raw 64-byte ed25519
+                    # signature base64-encoded PLUS the 32-byte public
+                    # key hex (XRP needs the explicit pubkey because its
+                    # addresses are HASH160s; SOL and XLM carry it for
+                    # protocol uniformity). The phone ALSO Ed25519-signs
+                    # the standard payload_hash_b64u so the bootloader
+                    # proves response provenance.
+                    if not signature_b64u:
+                        self._send_json(400, {"error": "ed_sign approval requires signature_b64u (Ed25519 envelope)"})
+                        return
+                    if not ed_signature_base64:
+                        self._send_json(400, {"error": "ed_sign approval requires ed_signature_base64"})
+                        return
+                    if not ed_pubkey_hex:
+                        self._send_json(400, {"error": "ed_sign approval requires ed_pubkey_hex"})
+                        return
+                    try:
+                        decoded_ed_sig = base64.b64decode(ed_signature_base64.strip(), validate=False)
+                    except Exception as ex:
+                        self._send_json(400, {"error": f"ed_signature_base64 not valid base64: {ex}"})
+                        return
+                    if len(decoded_ed_sig) != 64:
+                        self._send_json(400, {
+                            "error": f"ed_signature_base64 must decode to 64 bytes, got {len(decoded_ed_sig)}",
+                        })
+                        return
+                    ed_pubkey_clean = (
+                        ed_pubkey_hex[2:]
+                        if ed_pubkey_hex.startswith(("0x", "0X"))
+                        else ed_pubkey_hex
+                    )
+                    if len(ed_pubkey_clean) != 64:
+                        self._send_json(400, {
+                            "error": f"ed_pubkey_hex must be 64 hex chars (32-byte ed25519 pubkey) "
+                                     f"after optional 0x prefix, got {len(ed_pubkey_clean)}",
+                        })
+                        return
+                    try:
+                        ed_pubkey_bytes = bytes.fromhex(ed_pubkey_clean)
+                    except ValueError as ex:
+                        self._send_json(400, {"error": f"ed_pubkey_hex not hex: {ex}"})
+                        return
+                    if STATE.verify_signatures:
+                        try:
+                            pub = b64u_decode(phone["public_key_b64u"])
+                            sig = b64u_decode(signature_b64u)
+                            payload = b64u_decode(pending["context"]["payload_hash_b64u"])
+                        except Exception as ex:
+                            self._send_json(400, {"error": f"base64url decode failed: {ex}"})
+                            return
+                        verified = verify_signature(phone["algorithm"], pub, payload, sig)
+                        if not verified:
+                            self._send_json(400, {
+                                "error": f"{phone['algorithm']} envelope signature does not verify "
+                                         f"against the registered public key for this phone",
+                            })
+                            return
+                    else:
+                        verified = True
+                    extra_response_fields["ed_signature_base64"] = ed_signature_base64
+                    extra_response_fields["ed_pubkey_hex"] = ed_pubkey_clean
+                    extra_response_fields["ed_chain"] = pending["context"].get("ed_chain")
+                    extra_response_fields["ed_message_kind"] = pending["context"].get("ed_message_kind")
+                    extra_response_fields["ed_address"] = pending["context"].get("ed_address")
+                    extra_response_fields["ed_message_text"] = pending["context"].get("ed_message_text")
+                    # Best-effort chain-signature verification + address
+                    # derivation. If recto.solana / recto.stellar /
+                    # recto.ripple are on PYTHONPATH (mock running from
+                    # inside the Recto checkout), verify the ed25519
+                    # signature against the supplied pubkey AND derive
+                    # the address from the pubkey, comparing to the
+                    # operator-approved expected address. Failure here
+                    # is non-fatal; the protocol RFC says the bootloader
+                    # doesn't validate the chain sig.
+                    try:
+                        ed_chain_resp = pending["context"].get("ed_chain", "sol")
+                        msg_text_ed = pending["context"].get("ed_message_text", "") or ""
+                        if ed_chain_resp == "sol":
+                            from recto.solana import (
+                                signed_message_hash as _sol_msg_hash,
+                                verify_signature as _sol_verify,
+                                address_from_public_key as _sol_addr,
+                            )
+                            digest_ok = _sol_verify(msg_text_ed.encode("utf-8"), decoded_ed_sig, ed_pubkey_bytes)
+                            derived_addr = _sol_addr(ed_pubkey_bytes)
+                            extra_response_fields["ed_signature_verified"] = bool(digest_ok)
+                            extra_response_fields["ed_derived_address"] = derived_addr
+                        elif ed_chain_resp == "xlm":
+                            from recto.stellar import (
+                                verify_signature as _xlm_verify,
+                                address_from_public_key as _xlm_addr,
+                            )
+                            digest_ok = _xlm_verify(msg_text_ed.encode("utf-8"), decoded_ed_sig, ed_pubkey_bytes)
+                            derived_addr = _xlm_addr(ed_pubkey_bytes)
+                            extra_response_fields["ed_signature_verified"] = bool(digest_ok)
+                            extra_response_fields["ed_derived_address"] = derived_addr
+                        elif ed_chain_resp == "xrp":
+                            from recto.ripple import (
+                                verify_signature as _xrp_verify,
+                                address_from_public_key as _xrp_addr,
+                            )
+                            digest_ok = _xrp_verify(msg_text_ed.encode("utf-8"), decoded_ed_sig, ed_pubkey_bytes)
+                            derived_addr = _xrp_addr(ed_pubkey_bytes)
+                            extra_response_fields["ed_signature_verified"] = bool(digest_ok)
+                            extra_response_fields["ed_derived_address"] = derived_addr
+                        else:
+                            extra_response_fields["ed_recovery_error"] = f"unknown ed_chain: {ed_chain_resp}"
+                            derived_addr = None
+                        # Compare derived vs expected (operator-approved
+                        # address from queue time). Suppress the match
+                        # comparison when the queued address is a
+                        # placeholder (the operator-UI default queue uses
+                        # one).
+                        expected_addr_ed = (pending["context"].get("ed_address") or "").strip()
+                        placeholder_prefixes = (
+                            "11111111111111111111111111111111",  # SOL all-zeros
+                            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",  # XLM all-zeros prefix
+                            "rPlaceholder",                      # XRP
+                        )
+                        if derived_addr is not None:
+                            if not expected_addr_ed or expected_addr_ed.startswith(placeholder_prefixes):
+                                pass  # leave ed_address_match unset
+                            else:
+                                extra_response_fields["ed_address_match"] = (
+                                    derived_addr == expected_addr_ed
+                                )
+                    except Exception as ex:  # noqa: BLE001
+                        extra_response_fields["ed_recovery_error"] = str(ex)
                 elif kind == "webauthn_assert":
                     missing = [
                         name for name, val in [
@@ -2490,6 +2632,18 @@ def render_index() -> str:
                 f"<span class='dim'>BTC {msg_kind}</span> "
                 f"<code>{network}</code>"
             )
+        if kind == "ed_sign":
+            msg_kind = r["context"].get("ed_message_kind", "?")
+            chain = r["context"].get("ed_chain", "?")
+            ticker = {"sol": "SOL", "xlm": "XLM", "xrp": "XRP"}.get(chain, chain.upper())
+            if msg_kind == "message_signing":
+                msg_text = r["context"].get("ed_message_text", "") or ""
+                preview = msg_text if len(msg_text) <= 64 else msg_text[:61] + "..."
+                return (
+                    f"<span class='dim'>{ticker} {msg_kind}</span> "
+                    f"&mdash; <code>{preview}</code>"
+                )
+            return f"<span class='dim'>{ticker} {msg_kind}</span>"
         return f"<span class='dim'>sign</span> <code>{r['service']}</code>/<code>{r['secret']}</code>"
 
     pending_html = "".join(
@@ -2660,6 +2814,69 @@ def render_index() -> str:
                 f"{recovery_html_btc} &mdash; {verify_marker}"
                 f"{msg_text_html_btc}"
                 f"{sig_full_html_btc}"
+            )
+        if kind == "ed_sign":
+            ed_sig = r.get("ed_signature_base64") or ""
+            ed_sig_short = (
+                ed_sig[:10] + "&hellip;" + ed_sig[-6:]
+                if len(ed_sig) > 22 else ed_sig
+            )
+            ed_pub = r.get("ed_pubkey_hex") or ""
+            ed_pub_short = (
+                ed_pub[:10] + "&hellip;" + ed_pub[-6:]
+                if len(ed_pub) > 22 else ed_pub
+            )
+            chain_ed = r.get("ed_chain", "?")
+            msg_kind_ed = r.get("ed_message_kind", "?")
+            derived_addr_ed = r.get("ed_derived_address")
+            msg_text_ed = r.get("ed_message_text") or ""
+            ticker_ed = {"sol": "SOL", "xlm": "XLM", "xrp": "XRP"}.get(chain_ed, chain_ed.upper())
+            recovery_html_ed = ""
+            if derived_addr_ed:
+                if r.get("ed_address_match") is True:
+                    recovery_html_ed = (
+                        f" &mdash; address <code>{derived_addr_ed}</code> "
+                        f"<span class='verified'>matches expected</span>"
+                    )
+                elif r.get("ed_address_match") is False:
+                    expected = r.get("ed_address") or "?"
+                    recovery_html_ed = (
+                        f" &mdash; address <code>{derived_addr_ed}</code> "
+                        f"<span class='warn'>differs from expected {expected}</span>"
+                    )
+                else:
+                    recovery_html_ed = f" &mdash; address <code>{derived_addr_ed}</code>"
+            elif r.get("ed_recovery_error"):
+                recovery_html_ed = (
+                    f" &mdash; <span class='warn'>"
+                    f"address derivation failed: {r.get('ed_recovery_error')}</span>"
+                )
+            sig_verified_marker = ""
+            if r.get("ed_signature_verified") is True:
+                sig_verified_marker = " <span class='verified'>(chain sig verified)</span>"
+            elif r.get("ed_signature_verified") is False:
+                sig_verified_marker = " <span class='warn'>(chain sig FAILED verify)</span>"
+            msg_text_html_ed = (
+                f"<br><span class='dim'>msg:</span> <code>{msg_text_ed}</code>"
+                if msg_text_ed else ""
+            )
+            sig_full_html_ed = (
+                f"<br><span class='dim'>sig (full base64):</span> "
+                f"<code style='word-break: break-all;'>{ed_sig}</code>"
+                if ed_sig else ""
+            )
+            pub_full_html_ed = (
+                f"<br><span class='dim'>pubkey (hex):</span> "
+                f"<code style='word-break: break-all;'>{ed_pub}</code>"
+                if ed_pub else ""
+            )
+            return (
+                f"<strong>approved</strong> &mdash; {ticker_ed} {msg_kind_ed}, "
+                f"sig <code>{ed_sig_short}</code>, pub <code>{ed_pub_short}</code>"
+                f"{recovery_html_ed}{sig_verified_marker} &mdash; {verify_marker}"
+                f"{msg_text_html_ed}"
+                f"{sig_full_html_ed}"
+                f"{pub_full_html_ed}"
             )
         return f"<strong>approved</strong> &mdash; kind <code>{kind}</code> &mdash; {verify_marker}"
 

@@ -543,7 +543,7 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Top-21 cryptocurrency expansion (in flight 2026-04-29)
+## Active sprint — Wave 8: TRON + XRP + SOL + XLM (next)
 
 Goal: maximize coin throughput per sprint window. Erik's target
 list is 21 coins; XMR / ZCASH / CC explicitly skipped (privacy-by-
@@ -551,105 +551,20 @@ design or institutional-architecture mismatch with Recto's
 self-custody model). Wave-by-wave plan ordered by leverage:
 chains that share infrastructure unlock multiple coins per wave.
 
-**Wave 6 — EVM expansion + EIP-712 + EIP-1559 (SHIPPED 2026-04-29).**
-Single highest-leverage move: extends `m/44'/60'` BIP-44 tree to
-21 EVM-compatible chains (mainnet + 6 L2s + 7 sidechains/alt-L1s
-+ 7 testnets) with all three signing verbs wired end-to-end —
-EIP-191 personal_sign (already shipped), EIP-712 typed_data (new),
-EIP-1559 (type-2) transaction (new). Unlocks 8 of 21 target coins
-in one wave: ETH (mainnet+L2s), BNB Smart Chain, AVAX C-chain,
-USDT, USDC, DAI, LINK, HYPE, USD1. Combined with ETH + BTC
-already shipped, ~13 of 21 covered. See CHANGELOG entry for the
-detailed primitive list (typed_data_hash, transaction_hash_eip1559,
-RLP, SignAndEncodeTransactionEip1559, mock-bootloader recovery).
-
-**Wave 7 — Bitcoin family (LTC + DOGE + BCH) (SHIPPED 2026-04-29).**
-Extends `btc_sign` from "Bitcoin only" to four coins via a single
-`btc_coin` discriminator field. Same crypto primitives across the
-family; per-coin differences (preamble, version bytes, bech32 HRP,
-BIP-44 coin type, default address kind) live in a single
-COIN_CONFIG table mirrored between Python and C#. Adds 3 of 21
-target coins (LTC native SegWit `ltc1q...`, DOGE legacy P2PKH
-`D...`, BCH legacy P2PKH `1...`); BCH retained Bitcoin's signed-
-message preamble post-fork so BTC + BCH share the same preimage
-hash for the same message. Combined with prior waves: **16 of 21
-top coins covered.** Wave 7 part 1 (UI redesign + Python coin
-parameter, 2026-04-29) and part 2 (C# protocol DTOs + state.py
-+ bootloader server + mock UI buttons + C# coin parameter +
-Razor render-arm + 11 new tests, same day) shipped consecutively.
-
-**MAC-side pivot (SHIPPED 2026-04-29).**
-Recto's test + deploy surface now covers macOS end-to-end:
-
-  1. **macOS pytest CI** via GitHub-hosted `macos-latest` runners
-     in `.github/workflows/test-mac.yml`. Recto is a public OSS
-     repo and self-hosted runners on public repos are an attack
-     vector (any fork can submit a PR with a malicious workflow
-     that executes on the runner — documented cryptominer-via-PR
-     pattern). GitHub-hosted runners sidestep this: ephemeral
-     VM per job, free for public repos, no machine-side setup.
-     Unlocks ~17 platform-gated tests that skip on Windows
-     (`test_sign_helper` Unix-socket flow, `test_joblimit`
-     Linux/macOS Win32-Job-Object guards,
-     `test_secrets_credman` / `test_secrets_dpapi_machine`
-     "Windows only" reverse-gates, `test_adminui` SO_REUSEADDR
-     semantics).
-  2. **iOS device deploy** stayed Mac-local because it needed
-     a physical iPhone connected via USB — GitHub-hosted
-     runners couldn't do that. Apple Developer Program ceremony
-     (Team ID-bound certs + provisioning profile registering
-     the device's UDID) on a Mac mini build host, manual
-     `dotnet publish -f net10.0-ios -c Release -r ios-arm64`
-     + `xcrun devicectl device install`. Activated the
-     `Platforms/iOS/IosSecureEnclaveKeyService.cs` Secure-Enclave
-     path that had been written since v0.5+ but never run on
-     real hardware.
-
-`Recto.csproj` targets `net10.0-ios` with
-`SupportedOSPlatformVersion=15.0`. Test device for the first
-deploy was an iPhone 11 running iOS 17.1.1 (the original plan
-had been an iPhone 7 capped at iOS 15.8.x — pivoted to iPhone 11
-when that turned out to be the available unit). Bundle ID is
-`app.recto.phone`; APNs entitlement is wired in
-`Platforms/iOS/Entitlements.plist`. Setup runbook in
-`docs/MAC-SETUP.md` (Part A: zero MAC setup needed, just trigger
-the workflow; Part B: iOS deploy ceremony).
-
-**iPhone 11 smoke tests passed end-to-end 2026-04-29 evening.**
-On real hardware:
-  - **Secure Enclave path active.** Pairing screen reported
-    `signing algorithm: ecdsa-p256`, confirming the iOS
-    `IosSecureEnclaveKeyService` (P-256 keypair via
-    `kSecAttrTokenIDSecureEnclave`, ACL =
-    `BiometryCurrentSet | PrivateKeyUsage`, DER-to-raw signature
-    conversion) was driving — NOT the cross-platform software
-    fallback.
-  - **All five coin families approved end-to-end.** ed25519
-    envelope (single_sign), secp256k1 + EIP-191 (ETH personal
-    sign), secp256k1 + BIP-137 (BTC + LTC + DOGE + BCH message
-    sign). Each approval round-tripped through the comms layer
-    back to the mock bootloader, which recovered the signer
-    address and reported ✓.
-  - **Dark vault UI rendered correctly on iOS WKWebView.** The
-    IDENTITY & ACCESS / CRYPTO TOKENS section split, per-coin
-    color-coded badges, and slim 2.75rem topbar all held up;
-    no platform-specific layout regressions.
-
-Architectural bet validated: phone-resident vault, agent-cap
-delegation by JWT, Secure Enclave as root of trust, one BIP-39
-mnemonic deriving five coin trees. Real-iPhone deploy validation
-closed; **Wave 8 unblocked**.
-
-**Lesson banked from the self-hosted runner false-start
-(2026-04-29):** never put a self-hosted GitHub Actions runner on
-a public repo without explicit fork-PR mitigations
-(`pull_request_target` removed, fork PRs gated behind
-manual approval, ideally the runner is ephemeral / containerized).
-Default to GitHub-hosted runners for public-repo CI; reach for
-self-hosted only when a private repo (AllThruit / Verso are both
-private — different threat model) or when the test genuinely
-requires unique hardware unavailable to GitHub-hosted (e.g.,
-iOS device deploy with a connected iPhone).
+**Coverage state entering this sprint: 16 of 21 top coins** signing
+through Recto, validated end-to-end on iPhone 11 hardware
+(2026-04-29). Recently shipped — all detail in `Prior sprints
+(shipped)` below + dated CHANGELOG entries:
+- **Wave 6** — EVM expansion + EIP-712 typed-data + EIP-1559
+  transaction (2026-04-29). Unlocked 8 EVM-family coins.
+- **Wave 7** — Bitcoin family extension (LTC + DOGE + BCH) via
+  `btc_coin` discriminator (2026-04-29). +3 coins.
+- **MAC-side pivot** — macOS pytest CI on GitHub-hosted runners +
+  iOS device deploy ceremony (2026-04-29). Unblocked iPhone smoke
+  tests.
+- **iPhone 11 smoke tests** — first time the v0.5+ Secure-Enclave
+  code paths ran on real hardware. All five coin families approved
+  end-to-end. Architectural bet validated.
 
 **Wave 8 / 9 — TRON, XRP, SOL, XLM (ACTIVE NEXT).** Each is its own curve +
 signature scheme:
@@ -688,13 +603,151 @@ demand emerges.
 - **Multi-account picker** — Settings page listing every address
   derived so far.
 - **PSBT (BIP-174) signing** — Bitcoin transaction signing.
-- **Real-iPhone deploy validation** — software impl is
-  cross-platform; gated on Apple-platform build host
-  availability + Xcode DeviceSupport.
+- **Friendlier `OSStatus -25293` translation** in
+  `Platforms/iOS/IosSecureEnclaveKeyService.cs` catch path —
+  emit "Set up a device passcode and Face ID in iOS Settings
+  before pairing" instead of dumping the raw OSStatus to the
+  operator. Open TODO banked from wave-7 iPhone-11 smoke test
+  (the first-iPhone-deploy stumble).
 
 ---
 
 ## Prior sprints (shipped)
+
+### Wave 7 — Bitcoin family extension (LTC + DOGE + BCH) (2026-04-29)
+
+Extends `btc_sign` from "Bitcoin only" to four coins via a single
+`btc_coin` discriminator field. Same crypto primitives across the
+family; per-coin differences (preamble, version bytes, bech32 HRP,
+BIP-44 coin type, default address kind) live in a single
+COIN_CONFIG table mirrored between Python (`recto.bitcoin`) and
+C# (`BtcSigningOps.CoinConfigs`). Adding a fifth coin = one entry
+in each table plus a test vector. No new credential kinds, no new
+RFC fields beyond the optional `btc_coin` discriminator, no
+breaking changes to v0.5 phones (absent / null `btc_coin` defaults
+to "btc").
+
+**Coverage unlocked.** Three more of the user's top-21 target coins
+activated:
+- **LTC (Litecoin)** — `m/84'/2'/0'/0/N` native SegWit P2WPKH
+  (`ltc1q...`) with HRP `ltc`. Litecoin Signed Message preamble.
+- **DOGE (Dogecoin)** — `m/44'/3'/0'/0/N` legacy P2PKH (`D...`,
+  version byte 0x1E). Dogecoin Signed Message preamble.
+- **BCH (Bitcoin Cash)** — `m/44'/145'/0'/0/N` legacy P2PKH
+  (`1...`, version byte 0x00 — same as BTC's legacy form). BCH
+  retained Bitcoin's signed-message preamble post-fork; only
+  the BIP-44 coin type and forward CashAddr surface differ.
+
+Wave shipped in two consecutive parts the same day: Wave 7 part 1
+(UI redesign with vault-aesthetic dark theme + IDENTITY/CRYPTO
+section split + per-coin badge classes + Python coin parameter)
+and Wave 7 part 2 (C# protocol DTOs + state.py + bootloader
+server + mock UI buttons + C# coin parameter + Razor render-arm
++ 11 new tests). All five coin families later validated on iPhone
+11 hardware (see iPhone smoke-test entry below).
+
+### Wave 6 — EVM expansion + EIP-712 + EIP-1559 (2026-04-29)
+
+Single highest-leverage move: extends `m/44'/60'` BIP-44 tree to
+21 EVM-compatible chains (mainnet + 6 L2s + 7 sidechains/alt-L1s
++ 7 testnets) with all three signing verbs wired end-to-end —
+EIP-191 personal_sign (already shipped), EIP-712 typed_data (new),
+EIP-1559 (type-2) transaction (new). Unlocks 8 of 21 target coins
+in one wave: ETH (mainnet+L2s), BNB Smart Chain, AVAX C-chain,
+USDT, USDC, DAI, LINK, HYPE, USD1.
+
+Net-new primitives: `typed_data_hash` + `transaction_hash_eip1559`
+in Python, `EthSigningOps.SignAndEncodeTransactionEip1559` +
+`SignAndEncodeTypedData` in C#, RLP encoding helpers, mock
+bootloader operator UI for queueing typed-data + transaction
+requests, address-recovery on the verify side. EVM chain-id
+constants live in a single `EvmChain` enum mirrored Python ↔ C#.
+
+### MAC-side pivot — macOS pytest CI + iOS device deploy (2026-04-29)
+
+Recto's test + deploy surface expanded to cover macOS end-to-end:
+
+  1. **macOS pytest CI** via GitHub-hosted `macos-latest` runners
+     in `.github/workflows/test-mac.yml`. The substrate is a public
+     OSS repo, and self-hosted runners on public repos are an
+     attack vector (any fork can submit a PR with a malicious
+     workflow that executes on the runner — documented
+     cryptominer-via-PR pattern). GitHub-hosted runners sidestep
+     this: ephemeral VM per job, free for public repos, no
+     machine-side setup. Unlocks ~17 platform-gated tests that
+     skip on Windows (`test_sign_helper` Unix-socket flow,
+     `test_joblimit` Linux/macOS Win32-Job-Object guards,
+     `test_secrets_credman` / `test_secrets_dpapi_machine`
+     "Windows only" reverse-gates, `test_adminui` SO_REUSEADDR
+     semantics).
+  2. **iOS device deploy** stayed Mac-local because it needed a
+     physical iPhone connected via USB — GitHub-hosted runners
+     can't do that. Apple Developer Program ceremony (Team
+     ID-bound certs + provisioning profile registering the
+     device's UDID) on a Mac mini build host, manual
+     `dotnet publish -f net10.0-ios -c Release -r ios-arm64`
+     + `xcrun devicectl device install`. Activated the
+     `Platforms/iOS/IosSecureEnclaveKeyService.cs` Secure-Enclave
+     path that had been written since v0.5+ but never run on
+     real hardware.
+
+`Recto.csproj` targets `net10.0-ios` with
+`SupportedOSPlatformVersion=15.0`. Bundle ID is
+`app.recto.phone`; APNs entitlement is wired in
+`Platforms/iOS/Entitlements.plist`. Setup runbook in
+`docs/MAC-SETUP.md` (Part A: zero MAC setup needed, just trigger
+the workflow; Part B: iOS deploy ceremony).
+
+**Lesson banked from the self-hosted runner false-start:** never
+put a self-hosted GitHub Actions runner on a public repo without
+explicit fork-PR mitigations (`pull_request_target` removed, fork
+PRs gated behind manual approval, ideally the runner is
+ephemeral / containerized). Default to GitHub-hosted runners for
+public-repo CI; reach for self-hosted only when a private repo
+(different threat model) or when the test genuinely requires
+unique hardware unavailable to GitHub-hosted (e.g., iOS device
+deploy with a connected iPhone).
+
+### iPhone 11 smoke tests — first real-hardware validation (2026-04-29)
+
+First time the v0.5+ iOS Secure-Enclave code paths ran against
+real hardware. Test device was an iPhone 11 running iOS 17.1.1
+(original plan was iPhone 7 capped at iOS 15.8.x; pivoted to
+iPhone 11 when that turned out to be the available unit).
+`SupportedOSPlatformVersion=15.0` continues to work — the iOS-17
+device is well above the floor.
+
+**Secure Enclave path active.** Pairing screen reported
+`signing algorithm: ecdsa-p256`, confirming the iOS
+`IosSecureEnclaveKeyService` (P-256 keypair via
+`kSecAttrTokenIDSecureEnclave`, ACL =
+`BiometryCurrentSet | PrivateKeyUsage`, DER-to-raw signature
+conversion) was driving — NOT the cross-platform software
+fallback.
+
+**All five coin families approved end-to-end:** ed25519 envelope
+(single_sign), secp256k1 + EIP-191 (ETH personal sign),
+secp256k1 + BIP-137 (BTC + LTC + DOGE + BCH message sign). Each
+approval round-tripped through the comms layer back to the mock
+bootloader, which recovered the signer address and reported ✓.
+
+**Dark vault UI rendered correctly on iOS WKWebView.** The
+IDENTITY & ACCESS / CRYPTO TOKENS section split, per-coin
+color-coded badges, and slim 2.75rem topbar all held up; no
+platform-specific layout regressions.
+
+Architectural bet validated: phone-resident vault, agent-cap
+delegation by JWT, Secure Enclave as root of trust, one BIP-39
+mnemonic deriving five coin trees. Real-iPhone deploy validation
+gate closed; Wave 8 unblocked.
+
+TLS path validation deferred — cleartext smoke tests proved every
+signature path works end-to-end against the LAN-bound mock
+bootloader (`NSAllowsLocalNetworking` exempts 10.0.0.x from ATS).
+Mock-self-signed-cert TLS adds cert-trust-on-iPhone friction
+without exercising any new crypto code; real TLS validation lands
+when Recto deploys behind a real Cloudflare Tunnel cert (already
+trusted by iOS).
 
 ### Bitcoin credential kind (3 waves, 2026-04-29)
 

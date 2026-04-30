@@ -1763,7 +1763,31 @@
     {
         while (!ct.IsCancellationRequested)
         {
-            await RefreshPendingAsync(ct);
+            // DIAG-2026-04-30 (auto-unpair investigation): wrap the
+            // refresh call. BootloaderClient.SendAsync already catches
+            // OCE / TaskCanceledException internally and returns a
+            // failed Result, so this catch shouldn't fire under normal
+            // operation. If it DOES fire, something else (e.g. an
+            // address-derivation call inside Populate*Async) is
+            // throwing during the refresh -- log it instead of letting
+            // it escape the loop silently.
+            try
+            {
+                await RefreshPendingAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    "[Recto/DIAG] PollLoopAsync: refresh cancelled (CT fired).");
+                return;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[Recto/DIAG] PollLoopAsync: refresh threw {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+                // Don't return -- one bad refresh shouldn't kill the
+                // whole polling loop. Sleep then continue.
+            }
             try
             {
                 await Task.Delay(PollInterval, ct);

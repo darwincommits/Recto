@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,6 +43,15 @@ public sealed class MauiPairingStateService : IPairingStateService
     {
         try
         {
+            // DIAG-2026-04-30 (auto-unpair investigation): log who's saving
+            // null pairing state. Manual UnpairAll button in Settings.razor
+            // is the only known caller; if anything else trips this, the
+            // stack trace tells us where.
+            if (state is null)
+            {
+                Debug.WriteLine($"[Recto/DIAG] MauiPairingStateService.SaveAsync(null) called.{Environment.NewLine}" +
+                                $"  Caller stack:{Environment.NewLine}{new StackTrace(true)}");
+            }
             var json = JsonSerializer.Serialize(state);
             await SecureStorage.Default.SetAsync(PairingStateKey, json).ConfigureAwait(false);
             return Result.Success();
@@ -56,6 +66,12 @@ public sealed class MauiPairingStateService : IPairingStateService
     {
         try
         {
+            // DIAG-2026-04-30 (auto-unpair investigation): log every caller.
+            // HandleUnpairClick in Home.razor is the only known caller; any
+            // other path that lands here means something is unpairing the
+            // phone unexpectedly. Stack trace identifies the culprit.
+            Debug.WriteLine($"[Recto/DIAG] MauiPairingStateService.ClearAsync called.{Environment.NewLine}" +
+                            $"  Caller stack:{Environment.NewLine}{new StackTrace(true)}");
             SecureStorage.Default.Remove(PairingStateKey);
             return Task.FromResult(Result.Success());
         }

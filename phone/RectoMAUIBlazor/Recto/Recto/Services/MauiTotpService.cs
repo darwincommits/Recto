@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -133,6 +134,15 @@ public sealed class MauiTotpService : ITotpService
             // app, which is the right semantic for a Settings "Unpair all"
             // emergency wipe -- both TOTP secrets AND the pairing record
             // (also stored in SecureStorage) get cleared in one step.
+            //
+            // DIAG-2026-04-30 (auto-unpair investigation): log every caller.
+            // UnpairAllAsync in Settings.razor is the only known caller; if
+            // anything else trips this, the stack trace tells us where. This
+            // path nukes the pairing record AS A SIDE EFFECT (RemoveAll
+            // wipes everything in SecureStorage) so it's a candidate for
+            // the auto-unpair-after-typed-data-approval mystery.
+            Debug.WriteLine($"[Recto/DIAG] MauiTotpService.ClearAllAsync called (RemoveAll - nukes pairing too).{Environment.NewLine}" +
+                            $"  Caller stack:{Environment.NewLine}{new System.Diagnostics.StackTrace(true)}");
             SecureStorage.Default.RemoveAll();
             return Task.FromResult(Result.Success());
         }

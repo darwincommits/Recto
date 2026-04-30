@@ -3280,21 +3280,26 @@ def render_index() -> str:
 // NOTE: this whole block lives inside a Python f-string template, so
 // curly braces below are doubled per the f-string escape convention
 // (same as the CSS rules earlier in the same template).
+var _rectoChainRestored = false;
 function _updateEthFormActions() {{
   var sel = document.getElementById("ethChainSel");
   if (!sel) return;
   // Persist chain selection across page auto-reloads via localStorage.
   // The HTML's selected attribute is hardcoded to Base, so without
   // persistence the dropdown snaps back to Base on every 3s reload.
-  // On load: if a saved value exists, apply it to the dropdown BEFORE
-  // wiring the form actions, so the form-action chain reflects the
-  // restored selection. On change: persist whatever the operator picked.
+  // Page-load behavior: restore from localStorage if a saved value
+  // exists. Subsequent calls (operator-driven onchange events): just
+  // persist the new value; do NOT override it with the saved value
+  // (that would defeat the operator's pick on every dropdown change).
   try {{
-    var saved = localStorage.getItem("rectoEthChain");
-    if (saved && sel.value !== saved) {{
-      for (var j = 0; j < sel.options.length; j++) {{
-        if (sel.options[j].value === saved) {{ sel.selectedIndex = j; break; }}
+    if (!_rectoChainRestored) {{
+      var saved = localStorage.getItem("rectoEthChain");
+      if (saved && sel.value !== saved) {{
+        for (var j = 0; j < sel.options.length; j++) {{
+          if (sel.options[j].value === saved) {{ sel.selectedIndex = j; break; }}
+        }}
       }}
+      _rectoChainRestored = true;
     }}
     localStorage.setItem("rectoEthChain", sel.value);
   }} catch (e) {{ /* localStorage unavailable; continue with current value */ }}

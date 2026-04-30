@@ -460,6 +460,197 @@ in `%USERPROFILE%\private\local.md`.
   and fires before any network call). This is the canonical
   first-iPhone-deploy stumble.
 
+### Script-writing patterns (PowerShell + git, AI-authored)
+
+When AI authors a one-shot PowerShell script for the operator
+to run on Windows (commit + push wrappers, sanitization passes,
+deploy automations, etc.), the patterns below are non-negotiable.
+Each one bit during the wave-8 sanitization sprint and burnt
+operator-time on diagnosis.
+
+- **Write PowerShell scripts in pure ASCII.** Files written via
+  the Write tool default to UTF-8 without BOM. Windows PowerShell
+  5.1 reads UTF-8-no-BOM as Windows-1252 by default, mangles the
+  multi-byte UTF-8 sequences for any non-ASCII character, and the
+  parser cascade-fails with confusing errors like "Array index
+  expression is missing", "Unexpected token", "missing terminator"
+  — pointed at random spots downstream of the actual non-ASCII
+  byte. Substitute em-dash `—` → `--`, right-arrow `→` → `->`,
+  smart quotes → straight quotes, etc. Verify before handing the
+  script to the operator: `python3 -c "import sys; print(sum(1
+  for b in open(sys.argv[1],'rb').read() if b > 127))" path.ps1`
+  must return `0`. (Caught when a sanitization-pass script's
+  prose-style commit messages tripped PS5.1's parser; switched to
+  ASCII and parsed cleanly.)
+
+- **Pass Windows paths to bash subprocesses with forward-slashes
+  and single-quotes.** `git filter-branch --msg-filter "python
+  $winPath"` invokes the filter via bash, which interprets `\U`,
+  `\A`, `\L`, `\T`, `\t` as escape sequences inside double-quotes
+  and silently mangles the path. Symptom is a Python failure like
+  `can't open file '...UsersErikAppDataLocalTemptmp328A.py'` —
+  every backslash gone, every `\t` turned into a literal tab.
+  Fix: `$pathUnix = $winPath -replace '\\','/'` then wrap in
+  single-quotes inside the bash arg: `--msg-filter "python
+  '$pathUnix'"`. Forward-slashes work fine on Windows for both
+  Python's `open()` and git's path handling. Single-quotes
+  prevent any escape processing in bash even if a stray
+  backslash slips through.
+
+- **Always use raw strings for `re.sub` replacement templates
+  that contain backslashes.** Regular Python string
+  `'<dev-host-home>\\'` decodes to `<dev-host-home>\` (one
+  trailing backslash). `re.sub` interprets the trailing `\` as
+  the start of an escape sequence, finds nothing after, and
+  raises `re.error: bad escape (end of pattern) at position N`.
+  Fix: `r'<dev-host-home>\\'` (raw, two literal backslashes;
+  re.sub interprets `\\` as one literal `\` in output) — OR
+  explicit `'<dev-host-home>\\\\'` (regular string, four-char
+  escape produces two-char string). Raw is cleaner. Note this
+  is DIFFERENT from PowerShell's `-replace` (.NET regex), where
+  backslashes are NOT special in the replacement string at all
+  — `'<dev-host-home>\'` outputs `<dev-host-home>\` with one
+  backslash. Don't copy a substitution table directly between
+  PowerShell `-replace` and Python `re.sub` without re-thinking
+  the backslash escaping for each.
+
+- **`git filter-branch HEAD~N..HEAD` excludes the commit at
+  depth N.** Range syntax is "ancestors of HEAD that are NOT
+  ancestors of HEAD~N", which gives N commits at depths 0
+  through N-1. The commit at depth N (HEAD~N itself) is OUTSIDE
+  the range. To rewrite all reachable history pass plain `HEAD`
+  (no range, just the ref). For partial rewrites where you know
+  the deepest leaky commit's depth D, use `HEAD~$($D+1)..HEAD`
+  to include it. Caught when the first sanitization pass left
+  five leaky commits at depths 9, 10, 11, 13, 18 — the
+  `HEAD~9..HEAD` range only covered depths 0-8.
+
+- **Use plain `--force` for one-shot AI-authored history-rewrite
+  pushes; `--force-with-lease` is over-conservative when local's
+  refs/remotes/origin/<branch> hasn't been refreshed.** The lease
+  check compares origin's actual tip to what local THINKS origin
+  is, and an outdated tracking ref makes the comparison behave
+  unexpectedly. For sanitization rewrites where the AI controls
+  both ends and the operator is the only pusher, plain `--force`
+  is the right tool. Use `--force-with-lease` only when there's
+  genuine concurrent-pusher risk on the same branch.
+
+- **Sanitization scripts must spot-check BEFORE the push, not
+  after.** A sanitization pass that finds residual leaks AFTER
+  pushing leaves the public tree in a half-clean state. Phase
+  ordering: scrub working-tree contents → file renames (`git
+  mv`) → commit → filter-branch messages → spot-check both
+  messages and tree → only THEN force-push. The script halts
+  with a clear recovery instruction if the spot-check fails;
+  operator iterates until clean, push happens automatically
+  on the final pass.
+
+- **Always create a backup branch before destructive history
+  rewrite.** `git branch -f pre-sanitize-backup HEAD` is the
+  safety net. Recovery is `git reset --hard pre-sanitize-backup;
+  git push --force origin main`. Operator deletes the backup
+  ONLY after eyeballing origin/main and confirming the rewrite
+  landed correctly (`git ls-remote origin refs/heads/main`
+  matches local HEAD).
+
+- **`git mv` after content edits in the same script run.** When
+  scrubbing a file's contents AND renaming it (operator-codename-
+  named filename being replaced with a generic equivalent), order:
+  edit content in-place via PowerShell, then `git mv old new`.
+  `git mv` carries the modified content forward without losing
+  the edit; the index sees both the rename AND the content
+  change as one operation. Cross-references to the old filename
+  in OTHER markdown get caught by the same content-substitution
+  pass (the rename's old/new pair appears in the substitution
+  table).
+
+- **Allow-list authors-metadata files from regex sanitization.**
+  A `\b<personal-name>\b -> the operator` substitution over a
+  regex-only file scrub will mangle `pyproject.toml`'s legal
+  Apache-2.0 author attribution: a hypothetical
+  `authors = [{name = "Foo Bar"}]` becomes
+  `authors = [{name = "the operator Bar"}]` if the substitution
+  matches the personal name. The author attribution is
+  legitimate metadata, not an operator-context leak. Approach:
+  per-file allow-list excludes `pyproject.toml` (and similarly
+  `LICENSE`, `AUTHORS`, `CONTRIBUTORS.md`, etc.) from the regex
+  pass; scrub everything else. The post-rewrite spot-check
+  step similarly excludes those files from the working-tree
+  leak scan.
+
+- **Filter-branch needs `-f` if `.git-rewrite/` exists from a
+  prior failed run.** Symptom: `A previous backup already
+  exists in refs/original/`. Fix: pass `-f` to overwrite.
+  AI-authored sanitization scripts should always pass `-f`
+  since the operator may be retrying after an earlier abort.
+
+### Application-substrate patterns banked from wave-8
+
+- **Mock-bootloader / dev-tools scripts: self-locate the
+  package root at module-import time.** Pattern at the top of
+  any dev-tools script that imports first-party packages:
+  ```python
+  _repo_root = pathlib.Path(__file__).resolve().parents[N]
+  if (_repo_root / "package").is_dir() and str(_repo_root) not in sys.path:
+      sys.path.insert(0, str(_repo_root))
+  ```
+  Sidesteps `No module named X` errors when the script is
+  invoked from a non-rooted Python (build cache, `PYTHONPATH`-
+  stripped wrapper, IDE-launched without project root, etc.).
+  The `N` parameter is the script's depth below the repo root;
+  verify by computing `_repo_root` and confirming
+  `(_repo_root / "package").is_dir()` succeeds. Without this,
+  operator-facing UI rows fall through to "address recovery
+  failed: No module named '<pkg>'" warnings next to perfectly-
+  valid signatures — looks like a real bug to non-implementer
+  operators.
+
+- **Per-coin / per-chain discriminator-field assignment must
+  be OUTSIDE any `try` over an optional library import.** When
+  the operator-UI render path dispatches on a discriminator
+  (`btc_coin`, `ed_chain`, etc.) for ticker labels, the
+  field MUST be set BEFORE the try block that imports the
+  optional verifier library. If inside the try, an `ImportError`
+  leaves the field unset, the renderer falls back to a default
+  ticker, and operators see (e.g.) "BTC message_signing" next
+  to a Litecoin login. Operators approving signing requests
+  under wrong tickers is exactly the failure mode that drops
+  on-chain authority to the wrong chain. Pattern:
+  ```python
+  # CORRECT — discriminator set unconditionally
+  extra_response_fields["btc_coin"] = coin_btc
+  try:
+      from package.bitcoin import recover_address
+      # ... use it ...
+  except ImportError:
+      extra_response_fields["btc_recovery_error"] = "module unavailable"
+
+  # WRONG — discriminator is lost on import failure
+  try:
+      from package.bitcoin import recover_address
+      extra_response_fields["btc_coin"] = coin_btc
+      # ...
+  except ImportError:
+      pass
+  ```
+  Same pattern applies to any future multi-coin or multi-chain
+  discriminator. Caught wave-7-retroactive during the wave-8
+  ed25519-trio smoke when the macOS host's mock didn't have the
+  package on PYTHONPATH and every BTC-family row rendered with
+  the "BTC" default ticker regardless of `btc_coin`.
+
+- **Operator-facing label dispatch: every render path must use
+  the discriminator field, not hardcoded strings.** Pending-row
+  labels, response-row labels, approval-card UI, and any other
+  surface that emits a coin/chain ticker MUST each dispatch
+  through the same `{discriminator: ticker}` mapping. Hardcoded
+  string prefixes (e.g. "BTC " inside a label string) silently
+  produce wrong tickers when the discriminator is non-default.
+  Audit checklist when adding a multi-coin discriminator: grep
+  for every place the family-default ticker appears as a literal
+  string and convert each to a dispatch lookup against the
+  discriminator field.
+
 ### Phone-app gotchas → moved
 
 The MAUI / iOS / Android phone-app gotchas (build / sign / Razor /

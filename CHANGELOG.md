@@ -82,10 +82,31 @@ BCH, SOL, XLM, XRP, TRON.
   pubkey, validating the TIP-191 length-byte ASCII-decimal
   encoding, distinctness vs EIP-191, sign-then-recover round-trip.
 
-**Validation pending**: rebuild MAUI on MAC, redeploy to the test
-device, queue a `tron_sign` from the mock bootloader operator UI,
-approve on the phone, confirm the `tron_recovered_address` matches
-the phone-derived address (no amber warning, green "verified" pill).
+**Validated 2026-04-30**: rebuild + redeploy + smoke against the
+test device landed clean. Phone displayed the TRON request with
+red TRX badge, mainnet network, derivation path `m/44'/195'/0'/0/0`,
+derived address `TVm1H9XYdGKGnT5goozq3moyXmZtRgwtrJ`, and the
+TIP-191 message text. Approve produced a 65-byte r||s||v signature;
+the mock bootloader recovered the signer address from the rsv and
+matched the phone-derived address byte-for-byte. Green "verified"
+pill, no amber warning. POST /v0.4/respond returned 200. Coverage
+20/21 (95.2%) hardware-proven end-to-end on the test device.
+Cardano (ADA) is the only remaining target coin; ships in Wave 10
+when its custom SLIP-23 / CIP-1852 derivation lands.
+
+**Hotfix shipped same-day**: first iPhone smoke surfaced an
+UnboundLocalError in the mock bootloader's tron_sign envelope-
+verify branch -- referenced `target_phone` (queue-handler-only
+variable) instead of `phone` (respond-handler scope). Caught by my
+own try/except, surfaced as "HTTP 400: envelope verify failed:
+local variable 'target_phone' referenced before assignment" on the
+phone. Bootloader log was silent because the broken catch
+swallowed the exception before it could reach stderr. Fix aligned
+the branch with the canonical eth_sign envelope-verify pattern;
+the broken catch-all was removed, so future tron-branch exceptions
+now bubble up to BaseHTTPRequestHandler's default exception
+handler (which writes tracebacks to stderr ->
+`~/recto-bootloader.log`). After the hotfix, smoke ran clean.
 
 ### Added — Wave 9 part 1: TRON verifier + protocol DTOs (2026-04-30)
 

@@ -236,6 +236,32 @@ during the Tier-1 v1-readiness sprint).
   the first cross-platform-MAUI publish from a fresh macOS build
   context).
 
+  **Sub-gotcha: if `xattr -cr .` doesn't stick -- specifically
+  `com.apple.fileprovider.fpfs#P` re-appearing on the .app bundle
+  within seconds of a clean -- the repo is inside an iCloud-synced
+  folder.** macOS's iCloud File Provider stamps every file written
+  under `~/Documents/` and `~/Desktop/` (when the "Desktop &
+  Documents Folders" sync is enabled, which it commonly is by
+  default). The stamp gets re-applied after each fresh
+  `dotnet publish` writes a new .app bundle; codesign rejects the
+  stamp; the next clean+rebuild cycle hits the same wall. Killing
+  any subordinate processes (mock-bootloader, watchers, anything
+  the operator suspects might be touching files in the tree) does
+  NOT help -- the iCloud daemon races `dotnet publish`'s output
+  step regardless. Permanent fix: clone the repo OUTSIDE
+  `~/Documents/` and `~/Desktop/`. GitHub Desktop's default
+  `~/Documents/GitHub/<repo>` is therefore the WRONG location for
+  any repo that produces codesigned iOS / Mac Catalyst output.
+  Switch GitHub Desktop's clone-default to `~/dev/` or just
+  `git clone` to `~/<repo>/` directly. The split between
+  documents-only repos (markdown, configs -- iCloud sync IS a
+  feature there) and code-with-codesigned-output repos (must stay
+  out of iCloud's territory) lives at the per-repo decision layer.
+  Caught wave-9 part 2 (2026-04-30) on the first iOS smoke after
+  a fresh GitHub-Desktop-default clone; resolved by `mv` to
+  `~/<repo>/`. After moving, codesign passed cleanly with
+  byte-identical source.
+
 - **iOS Simulator builds need ad-hoc signing, not no-signing —
   setting `EnableCodeSigning=false` produces an unsigned binary that
   the simulator refuses to launch.** Two failure modes ride on the

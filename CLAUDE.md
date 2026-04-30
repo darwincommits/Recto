@@ -796,7 +796,7 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Wave 9: TRON — parts 1 + 2 SHIPPED 2026-04-30; iPhone smoke pending
+## Active sprint — Wave 9: TRON — parts 1 + 2 SHIPPED 2026-04-30; iPhone smoke VALIDATED 2026-04-30; coverage 20/21 (95.2%) hardware-proven
 
 Wave 9 follows the Wave 6/7/8 split pattern: Python verifier
 + protocol DTOs landed first (commit earlier today), C# phone-side
@@ -838,11 +838,24 @@ CHANGELOG.md `[Unreleased]`:
   TIP-191 hash distinctness vs EIP-191, ASCII-decimal length-byte
   encoding, sign-then-recover round-trip.
 
-**iPhone smoke pending**: rebuild MAUI on MAC, redeploy to the
-test device, queue a `tron_sign` from the mock bootloader operator
-UI, approve on the phone, confirm the `tron_recovered_address`
-matches the phone-derived address (green "verified" pill, no amber
-"differs from expected" warning).
+**iPhone smoke VALIDATED 2026-04-30**: re-deploy + smoke on the
+test device landed clean. Phone displayed the TRON request with
+red TRX badge, mainnet, derivation path `m/44'/195'/0'/0/0`,
+derived address `TVm1H9XYdGKGnT5goozq3moyXmZtRgwtrJ`. Approve
+produced a 65-byte r||s||v signature; mock bootloader recovered
+the signer address from the rsv and it matched the phone-derived
+address byte-for-byte. Green "verified" pill. POST /v0.4/respond
+returned 200. Coverage 20/21 (95.2%) hardware-proven end-to-end.
+
+A same-day hotfix landed during the smoke run: the mock-
+bootloader's tron_sign envelope-verify branch had used
+`target_phone` (queue-handler-only variable) instead of `phone`
+(respond-handler scope), throwing UnboundLocalError on every
+approve. Caught by my own try/except, surfaced as a 400 to the
+phone. Fix aligned the branch with the eth_sign canonical
+envelope-verify pattern + removed the broken catch-all so future
+tron-branch exceptions bubble up to BaseHTTPRequestHandler's
+default exception handler (writes tracebacks to stderr -> log).
 
 **Cross-wave priorities still unblocked** (unchanged from Wave 8
 closure):

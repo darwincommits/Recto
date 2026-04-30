@@ -3277,16 +3277,19 @@ def render_index() -> str:
 // signature shape is identical across chains for personal_sign (where
 // chain is metadata only), but DIFFERS for typed_data (chainId in the
 // EIP-712 domain separator) and transaction (chainId in the RLP).
-function _updateEthFormActions() {
+// NOTE: this whole block lives inside a Python f-string template, so
+// curly braces below are doubled per the f-string escape convention
+// (same as the CSS rules earlier in the same template).
+function _updateEthFormActions() {{
   var sel = document.getElementById("ethChainSel");
   var chain = sel ? sel.value : "8453";
   var ids = ["_formEthPersonalSign", "_formEthTypedData", "_formEthTransaction"];
   var bases = ["/_queue_eth_personal_sign", "/_queue_eth_typed_data", "/_queue_eth_transaction"];
-  for (var i = 0; i < ids.length; i++) {
+  for (var i = 0; i < ids.length; i++) {{
     var f = document.getElementById(ids[i]);
     if (f) f.action = bases[i] + "?chain=" + encodeURIComponent(chain);
-  }
-}
+  }}
+}}
 _updateEthFormActions();
 </script>
 <form method="post" action="/_queue_btc_message_sign">

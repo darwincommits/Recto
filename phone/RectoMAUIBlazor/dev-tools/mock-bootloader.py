@@ -3232,23 +3232,95 @@ def render_index() -> str:
   .section-box-identity .section-box-title {{ color: #2e4a73; }}
   .section-box-crypto   {{ border-color: #d4b88c; background: #fbf6ec; }}
   .section-box-crypto .section-box-title {{ color: #6b4a17; }}
+  /* Wave-9 polish: 2x2 grid for the top four meta sections
+     (bootloader info / pairing codes / registered phones / pending
+     requests). Centered with a max-width so wide screens don't
+     stretch into uselessness. min-height per cell stabilizes the
+     layout against the 3s auto-reload -- when the count of phones
+     or pending requests changes, the cells stay the same size and
+     siblings don't reflow. */
+  body {{ max-width: 1200px; margin: 0 auto; padding: 0 1rem 2rem 1rem; }}
+  .top-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin: 1rem 0 1.5rem 0;
+  }}
+  .top-cell {{
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    background: #fcfcfc;
+    min-height: 9rem;
+  }}
+  .top-cell h2 {{ margin-top: 0; }}
+  .top-cell ul {{ margin: 0.25rem 0 0.5rem 0; }}
+  /* Wave-9 polish: log panels for the bottom three sections (issued
+     JWTs / recent responses / recent requests). Fixed-height scrollable
+     containers stop the page from growing as activity accumulates --
+     server-side buffers are already capped (responses=20, history=50)
+     but rendering them all inline grew the page taller and taller.
+     overflow-y: auto gives native scrollbar; min-height stabilizes
+     against quiet periods so the layout stays put when the panel
+     temporarily empties; the panel border + tint match the section-box
+     pattern used above. */
+  .log-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin: 0.5rem 0 1rem 0;
+  }}
+  .log-panel {{
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fcfcfc;
+    padding: 0.75rem 1rem;
+    height: 28rem;
+    overflow-y: auto;
+  }}
+  .log-panel-wide {{
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fcfcfc;
+    padding: 0.75rem 1rem;
+    height: 12rem;
+    overflow-y: auto;
+    margin: 0.5rem 0 1rem 0;
+  }}
+  .log-panel h2, .log-panel-wide h2 {{
+    margin-top: 0;
+    font-size: 1rem;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }}
+  .log-panel ul, .log-panel-wide ul {{ margin-top: 0.25rem; }}
 </style>
 </head><body>
-<h1>Mock Recto bootloader</h1>
-<p class="dim">bootloader_id: <code>{STATE.bootloader_id}</code></p>
-<p class="dim">signature verification: <code>{verify_status}</code>{crypto_note}</p>
-{tls_pin_html}
+<h1 style="text-align: center; margin-bottom: 0.25rem;">Mock Recto bootloader</h1>
 
-<h2>Pairing codes</h2>
-<ul>{codes_html}</ul>
-<form method="post" action="/_mint"><button type="submit">Mint pairing code</button></form>
-<form method="post" action="/_clear"><button type="submit">Clear all state</button></form>
-
-<h2>Registered phones</h2>
-<ul>{registered_html}</ul>
-
-<h2>Pending requests</h2>
-<ul>{pending_html}</ul>
+<div class="top-grid">
+  <div class="top-cell">
+    <h2 style="font-size: 1rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em;">Bootloader</h2>
+    <p class="dim" style="margin: 0.25rem 0;">bootloader_id: <code>{STATE.bootloader_id}</code></p>
+    <p class="dim" style="margin: 0.25rem 0;">signature verification: <code>{verify_status}</code>{crypto_note}</p>
+    {tls_pin_html}
+  </div>
+  <div class="top-cell">
+    <h2 style="font-size: 1rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em;">Pairing codes</h2>
+    <ul>{codes_html}</ul>
+    <form method="post" action="/_mint"><button type="submit">Mint pairing code</button></form>
+    <form method="post" action="/_clear"><button type="submit">Clear all state</button></form>
+  </div>
+  <div class="top-cell">
+    <h2 style="font-size: 1rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em;">Registered phones</h2>
+    <ul>{registered_html}</ul>
+  </div>
+  <div class="top-cell">
+    <h2 style="font-size: 1rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em;">Pending requests</h2>
+    <ul>{pending_html}</ul>
+  </div>
+</div>
 
 <div class="section-box section-box-identity">
 <span class="section-box-title">Identity &amp; access</span>
@@ -3391,17 +3463,26 @@ _updateEthFormActions();
   returned compact signature and surfaces it for inspection.
 </div>
 
-<h2>Provisioned TOTP aliases</h2>
-<ul>{totp_provisioned_html}</ul>
+<div class="log-panel-wide">
+  <h2>Provisioned TOTP aliases</h2>
+  <ul>{totp_provisioned_html}</ul>
+</div>
 
-<h2>Issued JWT capabilities</h2>
-<ul>{issued_jwts_html}</ul>
+<div class="log-panel-wide">
+  <h2>Issued JWT capabilities</h2>
+  <ul>{issued_jwts_html}</ul>
+</div>
 
-<h2>Recent responses</h2>
-<ul>{responses_html}</ul>
-
-<h2>Recent requests</h2>
-<ul>{history_html}</ul>
+<div class="log-grid">
+  <div class="log-panel">
+    <h2>Recent responses</h2>
+    <ul>{responses_html}</ul>
+  </div>
+  <div class="log-panel">
+    <h2>Recent requests</h2>
+    <ul>{history_html}</ul>
+  </div>
+</div>
 
 <script>
 // Auto-refresh the operator UI every 3s so newly-queued requests +

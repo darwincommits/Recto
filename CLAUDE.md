@@ -399,6 +399,67 @@ in `%USERPROFILE%\private\local.md`.
   cause immediately rather than chasing a NullReferenceException
   three frames down. Caught during wave-4 refactor 2026-04-28.
 
+- **iCloud account on the iPhone is fully independent of the Apple
+  Developer Program account on the build host.** Common first-deploy
+  panic: "do I need to wipe the test phone and sign it into the
+  developer's iCloud before the dev-built app will run?" No. Two
+  separate concerns:
+  (a) Apple Developer Program — issues code-signing certs +
+      provisioning profiles, scoped by Team ID + Bundle ID + UDID.
+      Lives on the build host (the Mac running Xcode / dotnet
+      publish). Lets the build host install apps to a device whose
+      UDID is registered in the profile.
+  (b) iCloud account on the phone — runs Photos / Messages / App
+      Store / Find My / etc. Personal services, totally orthogonal
+      to dev-installed apps.
+  Dev-installed apps run regardless of which iCloud (if any) is
+  signed in on the device, as long as (a) is correct. **Strong
+  recommendation:** never wipe a borrowed test device to "clean
+  it up for development." Activation Lock (post-iOS 7) requires
+  the prior iCloud user's Apple ID password during setup-after-
+  erase; if that password isn't immediately available, the device
+  soft-bricks until the prior user signs it out remotely from
+  Find My. The provisioning + signing path doesn't need a wipe.
+  Caught wave-7 (2026-04-29) on first real-iPhone deploy ceremony —
+  the operator considered wiping a borrowed test device "to use
+  the developer's own iCloud" before realizing the Apple Developer
+  Program account on the build host was fully sufficient and the
+  iCloud account was a non-factor.
+
+- **`OSStatus -25293 errSecAuthFailed` on Secure Enclave keygen
+  with an ACL of `BiometryCurrentSet | PrivateKeyUsage` means
+  the device has no enrolled biometric AND/OR no device passcode
+  set — NOT a code bug, NOT a provisioning problem.** Symptom:
+  iPhone with Recto installed, app opens fine, user enters
+  bootloader URL + pairing code, taps Pair, immediately gets
+  `Secure Enclave keygen failed: The operation couldn't be
+  completed. (OSStatus error -25293 - Key generation failed,
+  error -25293)` BEFORE any network request fires. The keygen
+  is purely local; `errSecAuthFailed` at this stage means
+  Secure Enclave's policy evaluator couldn't satisfy the
+  `BiometryCurrentSet` ACL. Two prerequisites the iPhone must
+  have for our enclave path to mint a key:
+  (a) Device passcode set (Settings → Face ID & Passcode →
+      Turn Passcode On). Secure Enclave refuses to mint ANY key
+      on a passcode-less device — a passcode is the root credential
+      Secure Enclave uses to wrap the key material.
+  (b) At least one Face ID enrollment (Settings → Face ID &
+      Passcode → Set Up Face ID). The `BiometryCurrentSet` flag
+      binds the key to the currently-enrolled biometric set; with
+      no enrolled biometric, the policy can't be evaluated and
+      keygen aborts.
+  Test devices commonly skip both. **Operator fix:** enable
+  passcode + enroll Face ID, then retry pairing. **Code-side
+  follow-up** (open TODO): translate raw `OSStatus -25293` into
+  an operator-readable message in `IosSecureEnclaveKeyService.cs`'s
+  catch path — "Set up a device passcode and Face ID in iOS
+  Settings before pairing" rather than dumping the OSStatus.
+  Caught wave-7 (2026-04-29) during first real-iPhone smoke-test
+  attempt; the error message led the operator to chase it as a
+  TLS / transport problem, which it isn't (keygen is purely local
+  and fires before any network call). This is the canonical
+  first-iPhone-deploy stumble.
+
 ### Phone-app gotchas → moved
 
 The MAUI / iOS / Android phone-app gotchas (build / sign / Razor /
@@ -461,6 +522,27 @@ read that file in addition to this one.
   passing through `.env` or `AppEnvironmentExtra`; that's the
   expected default for any new secret going forward.
 
+- **First real-iPhone deploy + Secure Enclave smoke tests 2026-04-29.**
+  iPhone 11 running iOS 17.1.1, deployed via `dotnet publish` +
+  `xcrun devicectl device install` from a Mac mini build host under
+  an Apple Developer Program account (Team ID-bound provisioning
+  profile registering the device UDID). Pairing screen reported
+  `signing algorithm: ecdsa-p256`, confirming the
+  `IosSecureEnclaveKeyService` Secure-Enclave path drove — NOT
+  the cross-platform software fallback. All five coin families
+  signed end-to-end on real hardware: ed25519 envelope, secp256k1
+  + EIP-191 (ETH), and secp256k1 + BIP-137 across BTC + LTC +
+  DOGE + BCH. Every approval round-tripped through the comms
+  layer back to the mock bootloader, which recovered the signer
+  address and reported ✓. Dark vault UI rendered correctly on
+  iOS WKWebView with no platform-specific layout regressions.
+  This is the first time the v0.5+ Secure-Enclave code paths
+  ran against real hardware (previously written + unit-tested
+  only). Real-iPhone deploy validation gate closed; the
+  architectural bet (phone-resident vault + Secure Enclave as
+  root of trust + one mnemonic deriving five coin trees) is now
+  validated end-to-end.
+
 ## Active sprint — Top-21 cryptocurrency expansion (in flight 2026-04-29)
 
 Goal: maximize coin throughput per sprint window. Erik's target
@@ -496,9 +578,8 @@ parameter, 2026-04-29) and part 2 (C# protocol DTOs + state.py
 + bootloader server + mock UI buttons + C# coin parameter +
 Razor render-arm + 11 new tests, same day) shipped consecutively.
 
-**MAC-side pivot (in flight 2026-04-29, paused mid-wave-8).**
-Before Wave 8 (TRON + XRP + SOL + XLM), expanding the Recto test
-+ deploy surface to cover macOS:
+**MAC-side pivot (SHIPPED 2026-04-29).**
+Recto's test + deploy surface now covers macOS end-to-end:
 
   1. **macOS pytest CI** via GitHub-hosted `macos-latest` runners
      in `.github/workflows/test-mac.yml`. Recto is a public OSS
@@ -513,27 +594,51 @@ Before Wave 8 (TRON + XRP + SOL + XLM), expanding the Recto test
      `test_secrets_credman` / `test_secrets_dpapi_machine`
      "Windows only" reverse-gates, `test_adminui` SO_REUSEADDR
      semantics).
-  2. **iOS device deploy** stays MAC-local because it needs
+  2. **iOS device deploy** stayed Mac-local because it needed
      a physical iPhone connected via USB — GitHub-hosted
-     runners can't do that. Apple Developer Program ceremony
-     + Xcode + provisioning profile on Erik's MAC, manual
+     runners couldn't do that. Apple Developer Program ceremony
+     (Team ID-bound certs + provisioning profile registering
+     the device's UDID) on a Mac mini build host, manual
      `dotnet publish -f net10.0-ios -c Release -r ios-arm64`
-     + `xcrun devicectl device install`. Activates
-     `Platforms/iOS/IosSecureEnclaveKeyService.cs` and
-     `IosApnsPushTokenService.cs` paths that have been written
-     since v0.5+ but never run on real hardware.
+     + `xcrun devicectl device install`. Activated the
+     `Platforms/iOS/IosSecureEnclaveKeyService.cs` Secure-Enclave
+     path that had been written since v0.5+ but never run on
+     real hardware.
 
-`Recto.csproj` already targets `net10.0-ios` with
-`SupportedOSPlatformVersion=15.0`, so iPhone 7 (which caps at
-iOS 15.8.x) deploys without a minimum-OS workaround. Bundle ID
-is `app.recto.phone`; APNs entitlement is wired in
+`Recto.csproj` targets `net10.0-ios` with
+`SupportedOSPlatformVersion=15.0`. Test device for the first
+deploy was an iPhone 11 running iOS 17.1.1 (the original plan
+had been an iPhone 7 capped at iOS 15.8.x — pivoted to iPhone 11
+when that turned out to be the available unit). Bundle ID is
+`app.recto.phone`; APNs entitlement is wired in
 `Platforms/iOS/Entitlements.plist`. Setup runbook in
 `docs/MAC-SETUP.md` (Part A: zero MAC setup needed, just trigger
 the workflow; Part B: iOS deploy ceremony).
 
-Wave 8 resumes after MAC validates the iOS Recto build deploys
-to Erik's iPhone 7 cleanly. Wave 8 scope unchanged (TRON + XRP
-+ SOL + XLM = 4 more coins → 20 of 21 covered).
+**iPhone 11 smoke tests passed end-to-end 2026-04-29 evening.**
+On real hardware:
+  - **Secure Enclave path active.** Pairing screen reported
+    `signing algorithm: ecdsa-p256`, confirming the iOS
+    `IosSecureEnclaveKeyService` (P-256 keypair via
+    `kSecAttrTokenIDSecureEnclave`, ACL =
+    `BiometryCurrentSet | PrivateKeyUsage`, DER-to-raw signature
+    conversion) was driving — NOT the cross-platform software
+    fallback.
+  - **All five coin families approved end-to-end.** ed25519
+    envelope (single_sign), secp256k1 + EIP-191 (ETH personal
+    sign), secp256k1 + BIP-137 (BTC + LTC + DOGE + BCH message
+    sign). Each approval round-tripped through the comms layer
+    back to the mock bootloader, which recovered the signer
+    address and reported ✓.
+  - **Dark vault UI rendered correctly on iOS WKWebView.** The
+    IDENTITY & ACCESS / CRYPTO TOKENS section split, per-coin
+    color-coded badges, and slim 2.75rem topbar all held up;
+    no platform-specific layout regressions.
+
+Architectural bet validated: phone-resident vault, agent-cap
+delegation by JWT, Secure Enclave as root of trust, one BIP-39
+mnemonic deriving five coin trees. Real-iPhone deploy validation
+closed; **Wave 8 unblocked**.
 
 **Lesson banked from the self-hosted runner false-start
 (2026-04-29):** never put a self-hosted GitHub Actions runner on
@@ -546,7 +651,7 @@ private — different threat model) or when the test genuinely
 requires unique hardware unavailable to GitHub-hosted (e.g.,
 iOS device deploy with a connected iPhone).
 
-**Wave 8 / 9 — TRON, XRP, SOL, XLM.** Each is its own curve +
+**Wave 8 / 9 — TRON, XRP, SOL, XLM (ACTIVE NEXT).** Each is its own curve +
 signature scheme:
 - TRON: secp256k1 + Keccak-256 + base58 address (close cousin of
   ETH; can share SignWithRecovery primitive).

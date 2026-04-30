@@ -7,6 +7,80 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Validated — First real-iPhone deploy + Secure Enclave smoke tests (2026-04-29)
+
+First time the v0.5+ iOS Secure-Enclave code paths ran against real
+hardware. Closes the "real-iPhone deploy validation" gate that was
+the last open item in the MAC-side pivot before Wave 8.
+
+**Test device.** iPhone 11 (UDID-registered in the developer
+provisioning profile) running iOS 17.1.1, deployed via
+`dotnet publish -f net10.0-ios -c Release -r ios-arm64` +
+`xcrun devicectl device install` from a Mac mini build host under
+an Apple Developer Program account (Team ID-bound certs +
+provisioning profile). The original plan was an iPhone 7 capped
+at iOS 15.8.x; pivoted to iPhone 11 when that turned out to be
+the available unit. `Recto.csproj`'s
+`SupportedOSPlatformVersion=15.0` continues to work — the iOS-17
+device is well above the floor.
+
+**Secure Enclave path active.** Pairing screen reported
+`signing algorithm: ecdsa-p256`, confirming the iOS
+`IosSecureEnclaveKeyService` (P-256 keypair via
+`kSecAttrTokenIDSecureEnclave`, ACL =
+`BiometryCurrentSet | PrivateKeyUsage`, DER-to-raw signature
+conversion via `EcdsaSignatureFormat.DerToRaw`) was driving the
+sign path — NOT the cross-platform software fallback.
+
+**All five coin families approved end-to-end.** Across multiple
+mock-bootloader queue/approve cycles:
+- ed25519 envelope (`single_sign`, `webauthn_assert`,
+  `pkcs11_sign`, `pgp_sign` — all share the IEnclaveKeyService
+  signing path)
+- secp256k1 + EIP-191 personal_sign (Ethereum / EVM-family)
+- secp256k1 + BIP-137 compact-sig message_sign across BTC + LTC
+  + DOGE + BCH (Bitcoin family with per-coin preamble dispatch)
+
+Every approval round-tripped through the comms layer back to the
+mock bootloader, which recovered the signer address from the rsv
+or compact-sig and reported ✓.
+
+**UI rendered correctly on iOS WKWebView.** Wave-7's dark vault
+aesthetic — `:root` design tokens (`--rec-bg #0d1117`,
+`--rec-accent #d4a554` vault gold, per-coin `--rec-coin-*`),
+IDENTITY & ACCESS / CRYPTO TOKENS section split, slim 2.75rem
+topbar carrying brand mark + settings gear — all held up on iOS
+without platform-specific layout regressions.
+
+**Architectural bet validated.** Phone-resident vault, agent-cap
+delegation by JWT, Secure Enclave as root of trust, one BIP-39
+mnemonic deriving five coin trees — the shape works on real
+hardware. **Wave 8 unblocked** (TRON + XRP + SOL + XLM → 20 of
+21 coins covered).
+
+**Banked gotchas** (full text in `Recto/CLAUDE.md` Gotchas index +
+`phone/RectoMAUIBlazor/CLAUDE.md` Enclave / cryptography section):
+- `OSStatus -25293 errSecAuthFailed` on Secure Enclave keygen →
+  device needs both a passcode AND an enrolled biometric;
+  `BiometryCurrentSet` ACL can't evaluate without one. Canonical
+  first-iPhone-deploy stumble; can be misdiagnosed as a transport
+  / TLS / pairing-code issue because the error fires before any
+  network call. Open code-side TODO: translate raw OSStatus into
+  operator-readable copy in `IosSecureEnclaveKeyService.cs`.
+- iCloud account on the iPhone is fully independent of the
+  Apple Developer Program account on the build host — no need
+  to wipe a borrowed test device "to use the developer's iCloud."
+  Activation Lock makes wipes risky on shared-ownership devices.
+
+**TLS path validation deferred.** Cleartext smoke tests proved
+every signature path works end-to-end against the LAN-bound
+mock bootloader (NSAllowsLocalNetworking exempts 10.0.0.x from
+ATS). Mock-self-signed-cert TLS adds cert-trust-on-iPhone friction
+without exercising any new code in the phone-side crypto, the
+verifier, or the comms protocol. Real TLS validation lands when
+Recto deploys behind a real Cloudflare Tunnel cert (which iOS
+already trusts by default).
+
 ### Added — Wave 7: Bitcoin family (LTC + DOGE + BCH) end-to-end (2026-04-29)
 
 Extends the `btc_sign` credential kind from "Bitcoin only" to the

@@ -454,3 +454,35 @@ during the Tier-1 v1-readiness sprint).
   + `CryptoObject`). Activity must be a `FragmentActivity`
   (`MauiAppCompatActivity` qualifies); cast
   `Microsoft.Maui.ApplicationModel.Platform.CurrentActivity`.
+
+- **iPhone needs BOTH a passcode AND an enrolled biometric before
+  Secure Enclave will mint a key under
+  `BiometryCurrentSet | PrivateKeyUsage` ACL.** Symptom on first
+  pairing attempt against a fresh test device: red error box
+  `Secure Enclave keygen failed: The operation couldn't be
+  completed. (OSStatus error -25293 - Key generation failed,
+  error -25293)`. The error fires **before any network call**
+  (keygen is purely local), so it can be misdiagnosed as a
+  transport / TLS / pairing-code problem. `OSStatus -25293` =
+  `errSecAuthFailed`, which at keygen time means the policy
+  evaluator can't satisfy the ACL. Two prerequisites:
+  (a) Device passcode set — Secure Enclave refuses to mint ANY
+      key on a passcode-less device; the passcode is the root
+      credential it uses to wrap key material.
+  (b) At least one Face ID enrollment (or Touch ID on older
+      devices) — `BiometryCurrentSet` binds the key to the
+      currently-enrolled biometric set; with none enrolled, the
+      policy can't be evaluated.
+  **Operator fix:** Settings → Face ID & Passcode → set passcode +
+  enroll Face ID, then retry pair. **Open code-side TODO** in
+  `Platforms/iOS/IosSecureEnclaveKeyService.cs` catch path:
+  translate `OSStatus -25293` into "Set up a device passcode and
+  Face ID in iOS Settings before pairing" rather than dumping the
+  raw OSStatus to the operator. The current message reads like a
+  bug to the operator; a friendlier translation makes it clear
+  it's a one-time iOS-Settings step. Caught wave-7 (2026-04-29)
+  during first real-iPhone deploy ceremony — canonical
+  first-deploy stumble worth banking explicitly. (Cross-ref:
+  the same gotcha is also banked in the substrate
+  `Recto/CLAUDE.md` Gotchas index alongside the iCloud-account-vs-
+  Apple-Developer-Program independence note.)

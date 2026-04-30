@@ -368,6 +368,18 @@ class BootloaderHandler(BaseHTTPRequestHandler):
                 context["ed_message_text"] = p.ed_message_text
             if p.ed_payload_hex is not None:
                 context["ed_payload_hex"] = p.ed_payload_hex
+        # TRON-specific context (kind == "tron_sign", wave-9). Same
+        # emit-only-when-set pattern. Mirrors the C# `PendingRequestContext`
+        # TRON additions in `Recto.Shared.Protocol.V04`.
+        if p.kind == "tron_sign":
+            context["tron_network"] = p.tron_network
+            context["tron_message_kind"] = p.tron_message_kind
+            context["tron_address"] = p.tron_address
+            context["tron_derivation_path"] = p.tron_derivation_path
+            if p.tron_message_text is not None:
+                context["tron_message_text"] = p.tron_message_text
+            if p.tron_payload_hex is not None:
+                context["tron_payload_hex"] = p.tron_payload_hex
         return {
             "request_id": p.request_id,
             "kind": p.kind,
@@ -609,11 +621,64 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             # Normalize ed_pub to the un-prefixed form for downstream
             # forwarding so consumers don't have to re-strip.
             ed_pub = ed_pub_clean
+        # Same shape for tron_sign: structure-check only, opaque
+        # forward. TRON message-signing produces a 65-byte r||s||v
+        # secp256k1 signature exactly like Ethereum (130 hex chars
+        # after optional 0x prefix). The bootloader does NOT verify
+        # the secp256k1 signature itself -- consumers (chain RPC /
+        # off-chain verifier / capability-scope enforcer) recover
+        # the address via `recto.tron.recover_address` and compare
+        # to `tron_address` from the request context.
+        tron_sig: str | None = None
+        if req.kind == "tron_sign":
+            tron_sig = body.get("tron_signature_rsv")
+            if not isinstance(tron_sig, str) or not tron_sig:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      tron_signature_rsv=None,
+                                      reason="tron_signature_rsv missing on tron_sign approval")
+                raise BootloaderError(
+                    "tron_sign approval missing tron_signature_rsv"
+                )
+            cleaned = tron_sig[2:] if tron_sig.startswith(("0x", "0X")) else tron_sig
+            # message_signing returns 65-byte r||s||v = 130 hex chars.
+            # transaction is reserved (refused at construction time);
+            # add a length floor only when TRON transaction signing
+            # actually lands.
+            if len(cleaned) != 130:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      tron_signature_rsv=None,
+                                      reason="tron_signature_rsv wrong length")
+                raise BootloaderError(
+                    f"tron_signature_rsv must be 130 hex chars after optional "
+                    f"0x prefix, got {len(cleaned)}"
+                )
+            try:
+                bytes.fromhex(cleaned)
+            except ValueError as exc:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      tron_signature_rsv=None,
+                                      reason="tron_signature_rsv not hex")
+                raise BootloaderError(
+                    f"tron_signature_rsv must be hex, got {exc}"
+                ) from exc
         self._notify_resolved(req, ok=True, signature_b64u=sig,
                               eth_signature_rsv=eth_sig,
                               btc_signature_base64=btc_sig,
                               ed_signature_base64=ed_sig,
-                              ed_pubkey_hex=ed_pub, reason=None)
+                              ed_pubkey_hex=ed_pub,
+                              tron_signature_rsv=tron_sig, reason=None)
         self._send_json(HTTPStatus.OK, {"resolved": True})
 
     def _notify_resolved(
@@ -627,6 +692,7 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         btc_signature_base64: str | None = None,
         ed_signature_base64: str | None = None,
         ed_pubkey_hex: str | None = None,
+        tron_signature_rsv: str | None = None,
     ) -> None:
         """Surface a request resolution to the waiting launcher.
 
@@ -639,21 +705,39 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         "eth_sign"`` and the operator approved; ``btc_signature_base64``
         only when ``req.kind == "btc_sign"`` and approved;
         ``ed_signature_base64`` + ``ed_pubkey_hex`` only when ``req.kind
-        == "ed_sign"`` and approved. The launcher forwards all of these
-        to the consumer (smart contract / off-chain verifier / wallet
-        performing on-chain verification) without further validation.
-        ``signature_b64u`` is the Ed25519 paired-phone identity proof
-        and is populated for every approval regardless of kind.
+        == "ed_sign"`` and approved; ``tron_signature_rsv`` only when
+        ``req.kind == "tron_sign"`` and approved. The launcher forwards
+        all of these to the consumer (smart contract / off-chain
+        verifier / wallet performing on-chain verification) without
+        further validation. ``signature_b64u`` is the Ed25519
+        paired-phone identity proof and is populated for every
+        approval regardless of kind.
         """
         notify_fn = getattr(self.config, "notify_resolved_fn", None)
         if notify_fn is not None:
             # Be tolerant of older notify_fn signatures that don't
-            # accept the new kwargs. Try the full signature first; if
-            # the callable doesn't accept ed_*, retry without them;
-            # if it doesn't accept btc_signature_base64, retry without
+            # accept the new kwargs. Try the full signature first;
+            # if the callable doesn't accept tron_*, retry without
+            # it; if it doesn't accept ed_*, retry without them; if
+            # it doesn't accept btc_signature_base64, retry without
             # it (eth-only signatures from the wave-2 batch); if it
-            # doesn't accept eth_signature_rsv either, retry with only
-            # the v0.4.0 base 4-arg shape.
+            # doesn't accept eth_signature_rsv either, retry with
+            # only the v0.4.0 base 4-arg shape.
+            try:
+                notify_fn(
+                    req=req,
+                    ok=ok,
+                    signature_b64u=signature_b64u,
+                    eth_signature_rsv=eth_signature_rsv,
+                    btc_signature_base64=btc_signature_base64,
+                    ed_signature_base64=ed_signature_base64,
+                    ed_pubkey_hex=ed_pubkey_hex,
+                    tron_signature_rsv=tron_signature_rsv,
+                    reason=reason,
+                )
+                return
+            except TypeError:
+                pass
             try:
                 notify_fn(
                     req=req,

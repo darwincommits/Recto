@@ -239,6 +239,23 @@ class PendingRequest:
     ed_message_text: str | None = None  # for message_signing
     ed_payload_hex: str | None = None  # for transaction (reserved)
 
+    # TRON-specific context (kind == "tron_sign"). All optional with
+    # default None. Six fields mirror the C# `PendingRequestContext`
+    # TRON additions in `Recto.Shared.Protocol.V04` (Wave 9 part 2).
+    # See `docs/v0.4-protocol.md` "TRON signing capability (v0.6+)".
+    # TRON shares the same secp256k1 curve as ETH and BTC; what's
+    # different is the address encoding (base58check with version
+    # byte 0x41) and the signed-message preamble (TIP-191's
+    # "TRON Signed Message:\n" instead of EIP-191's "Ethereum
+    # Signed Message:\n"). The phone reuses the same BIP-39 mnemonic
+    # at SLIP-0044 coin-type 195: m/44'/195'/0'/0/N.
+    tron_network: str | None = None  # "mainnet" | "shasta" | "nile"
+    tron_message_kind: str | None = None  # "message_signing" | "transaction"
+    tron_address: str | None = None  # base58check, T-prefixed, 34 chars
+    tron_derivation_path: str | None = None  # default "m/44'/195'/0'/0/0"
+    tron_message_text: str | None = None  # for message_signing
+    tron_payload_hex: str | None = None  # for transaction (reserved)
+
     @classmethod
     def new(
         cls,
@@ -557,6 +574,114 @@ class PendingRequest:
             ed_derivation_path=ed_derivation_path,
             ed_message_text=ed_message_text,
             ed_payload_hex=ed_payload_hex,
+        )
+
+    @classmethod
+    def new_tron(
+        cls,
+        *,
+        service: str,
+        secret: str,
+        phone_id: str,
+        operation_description: str,
+        payload_hash_b64u: str,
+        child_pid: int,
+        child_argv0: str,
+        tron_network: str,
+        tron_message_kind: str,
+        tron_address: str,
+        tron_derivation_path: str = "m/44'/195'/0'/0/0",
+        tron_message_text: str | None = None,
+        tron_payload_hex: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> PendingRequest:
+        """Construct a ``tron_sign`` PendingRequest with the six
+        TRON-specific context fields populated.
+
+        Validates that:
+        - ``tron_network`` is one of ``"mainnet"``, ``"shasta"``,
+          ``"nile"``. (TRON's testnets share the same address-version
+          byte 0x41 as mainnet -- the network distinction lives at
+          the RPC + explorer layer, not the address encoding -- but
+          we surface it on the request so the operator UI can label
+          which environment is being signed against.)
+        - ``tron_message_kind`` is one of ``"message_signing"`` /
+          ``"transaction"``.
+        - exactly one of (``tron_message_text``, ``tron_payload_hex``)
+          is populated to match the message kind.
+        - ``tron_address`` matches the T-prefixed 34-char shape
+          (loose check: starts with ``T`` and is 34 chars long).
+          Full base58check validation runs verifier-side via
+          ``recto.tron.address_to_hex`` once the request lands.
+
+        Refuses ``tron_message_kind="transaction"`` for the moment --
+        TRON transactions wrap a protobuf-serialized ``Transaction``
+        message that requires a parser the verifier doesn't yet
+        ship. Reserved here for a follow-up wave so the protocol
+        seam is ready when the parser lands.
+
+        Raises ``ValueError`` on any failure; consumers (the
+        launcher, the mock bootloader operator-UI) are expected to
+        validate at construction time so a malformed request never
+        lands on the queue.
+        """
+        if tron_network not in ("mainnet", "shasta", "nile"):
+            raise ValueError(
+                f"tron_network must be one of 'mainnet'|'shasta'|'nile', "
+                f"got {tron_network!r}"
+            )
+        if tron_message_kind not in ("message_signing", "transaction"):
+            raise ValueError(
+                f"tron_message_kind must be one of "
+                f"'message_signing'|'transaction', got {tron_message_kind!r}"
+            )
+        body_fields = {
+            "message_signing": tron_message_text,
+            "transaction": tron_payload_hex,
+        }
+        expected = body_fields[tron_message_kind]
+        if expected is None or expected == "":
+            field_name = {
+                "message_signing": "tron_message_text",
+                "transaction": "tron_payload_hex",
+            }[tron_message_kind]
+            raise ValueError(
+                f"tron_message_kind={tron_message_kind!r} requires "
+                f"{field_name} to be set"
+            )
+        if tron_message_kind == "transaction":
+            # Reserved kind; not yet wired through to a TRON
+            # protobuf-transaction-hashing rule. Refuse here so a
+            # future phone impl can enable it without protocol drift.
+            raise ValueError(
+                "tron_message_kind='transaction' is reserved for a follow-up "
+                "wave; only 'message_signing' is wired today"
+            )
+        addr_clean = tron_address.strip()
+        if not addr_clean.startswith("T") or len(addr_clean) != 34:
+            raise ValueError(
+                f"tron_address must be 34-char T-prefixed base58check, "
+                f"got {tron_address!r}"
+            )
+        now = int(time.time())
+        return cls(
+            request_id=str(uuid.uuid4()),
+            kind="tron_sign",
+            service=service,
+            secret=secret,
+            phone_id=phone_id,
+            operation_description=operation_description,
+            payload_hash_b64u=payload_hash_b64u,
+            child_pid=child_pid,
+            child_argv0=child_argv0,
+            requested_at_unix=now,
+            expires_at_unix=now + ttl_seconds,
+            tron_network=tron_network,
+            tron_message_kind=tron_message_kind,
+            tron_address=addr_clean,
+            tron_derivation_path=tron_derivation_path,
+            tron_message_text=tron_message_text,
+            tron_payload_hex=tron_payload_hex,
         )
 
     @property

@@ -7,6 +7,97 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Wave 9 part 1: TRON verifier + protocol DTOs (2026-04-30)
+
+Sister implementation of Wave 6 (ETH) and Wave 7 (BTC family) for
+the TRON chain. Reuses the secp256k1 + Keccak-256 primitives from
+`recto.ethereum` directly; net-new is the address encoding
+(base58check with version byte 0x41 producing T-prefixed 34-char
+addresses) and the signed-message preamble (TIP-191's
+`"TRON Signed Message:\n"` instead of EIP-191's
+`"Ethereum Signed Message:\n"`).
+
+**Coverage**: brings the supported-coin list to 20 of 21 target
+coins (95.2%) at the protocol layer. Wave 9 part 2 (C# phone-side)
+closes the loop end-to-end on the test device.
+
+**Architecture**: one BIP-39 mnemonic per phone (shared with the
+existing `MauiEthSignService`, `MauiBtcSignService`, and
+`MauiEd25519ChainSignService`), one new BIP-32 secp256k1 tree at
+the standard SLIP-0044 coin-type 195: `m/44'/195'/0'/0/N`. Same
+backup ceremony continues to cover all six coin families now (ETH,
+BTC, LTC, DOGE, BCH, SOL, XLM, XRP, TRON). 24 words, nine chain
+trees.
+
+**Wave 9 part 1 deliverables**:
+
+- `recto.tron` Python module (~280 lines) -- TIP-191 hash with the
+  load-bearing leading 0x19 byte, base58check encode + decode,
+  address derivation from 64-byte uncompressed pubkey
+  (`base58check(0x41 || keccak256(pubkey64)[-20:])`), recover-
+  public-key + recover-address (delegates secp256k1 math to
+  `recto.ethereum`), `verify_signature` round-trip helper,
+  `address_to_hex` for cross-checking against blockchain explorers
+  + dev debugging.
+- `recto[tron]` extra in `pyproject.toml` (empty list -- gates the
+  import path; `cryptography` is pulled transitively via
+  `recto[v0_4]` if/when consumers want the verify path).
+- `PendingRequest.new_tron(...)` constructor in
+  `recto.bootloader.state` with construction-time validation
+  matching Wave 7's `new_btc` pattern. Six new optional
+  `tron_*` fields on the `PendingRequest` dataclass. Refuses
+  `tron_message_kind="transaction"` for the moment -- TRON's
+  protobuf-serialized `Transaction` parser isn't shipped yet;
+  reserved here so a future phone impl enables it without
+  protocol drift.
+- `_pending_to_wire` emits `tron_*` fields when
+  `kind == "tron_sign"` (omitted otherwise -- regression test
+  pins this).
+- `_handle_respond` structure-checks `tron_signature_rsv` (130 hex
+  chars after optional 0x prefix; valid hex). `_notify_resolved`
+  extends with `tron_signature_rsv: str | None = None` and a new
+  TypeError-fallback tier so older `notify_fn` callbacks that
+  pre-date Wave 9 keep working.
+- `phone/RectoMAUIBlazor/dev-tools/mock-bootloader.py`:
+  - new `/_queue_tron_message_sign` endpoint handler that mints a
+    TRON login-style message and queues a `tron_sign`
+    `PendingRequest` with the placeholder `T...` address (real
+    phone-derived address overrides on respond);
+  - "Queue TRON message_sign" operator-UI button on the index
+    page (mirrors the existing per-coin button row);
+  - TRON branch in `_handle_respond` validating the rsv shape and
+    surfacing `tron_signature_rsv` + `tron_recovered_address` to
+    the responses panel;
+  - recent-responses display branch rendering the TRON row with
+    network label, signature short-form, recovered address, and
+    full rsv breakdown;
+  - placeholder-address suppression so test queues with the
+    `TPlaceholder...` sentinel don't flag amber "differs from
+    expected" on a successful round-trip.
+- 22 new tests in `tests/test_tron.py` -- pin TIP-191 hash against
+  a known reference value, pin the secp256k1 generator point G's
+  TRON address (`TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC`, mechanically
+  derived from G's uncompressed pubkey via the same 20-byte ETH-
+  equivalent prefixed with 0x41 and base58check'd), exercise sign-
+  then-verify round-trips, distinctness vs EIP-191 and bare keccak.
+  All 22 pass locally.
+- ~25 new tests in `tests/test_bootloader_tron.py` -- construction
+  validation, `_pending_to_wire` emit-only-when-tron, end-to-end
+  live HTTP good-envelope/denied/missing-rsv/wrong-length/non-hex/
+  forged-envelope/non-tron-regression coverage. (Exercise pending
+  on Windows-side pytest -- the sandbox FUSE-mount-lag gotcha
+  prevents reliable in-sandbox runs after edits to `state.py` /
+  `server.py`.)
+
+**Wave 9 part 2 (next)**: C# phone-side. Mirrors Wave 6 (ETH C#)
+shape closely since TRON shares ETH's secp256k1 + Keccak primitive.
+Net-new: `Recto.Shared/Services/TronSigningOps.cs` (TIP-191 hash,
+base58check encoder, recover-id discovery), `MauiTronSignService`
+SecureStorage-backed orchestrator at `m/44'/195'/0'/0/0`,
+`Home.razor` render arm + ApproveTronSignAsync dispatcher, per-
+coin badge color in `app.css`. Same one-mnemonic-shared-across-
+services posture as the existing six chains.
+
 ### Fixed — BIP-137 header byte now dispatches on coin (Wave-7 retroactive, 2026-04-30)
 
 Smoke test of all 16 credential kinds on the test device (running

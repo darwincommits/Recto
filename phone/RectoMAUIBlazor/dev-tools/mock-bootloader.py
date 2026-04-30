@@ -1478,6 +1478,59 @@ class Handler(BaseHTTPRequestHandler):
             _queue_ed_chain_message_sign("xrp")
             return
 
+        if url.path == "/_queue_tron_message_sign":
+            # Wave-9 TRON message_signing. Same shape as ETH personal_sign
+            # since both share secp256k1 + Keccak-256, but with TIP-191
+            # preamble + base58check addresses. Phone derives the
+            # secp256k1 key from its BIP-39 mnemonic at the default
+            # m/44'/195'/0'/0/0 path (SLIP-0044 coin-type 195 for TRON),
+            # signs the TIP-191 hash AND the standard payload_hash_b64u
+            # (Ed25519 envelope), and POSTs back via /v0.4/respond/<id>.
+            with STATE._lock:
+                target_phone = STATE.registered[-1] if STATE.registered else None
+            if target_phone is None:
+                self._send_redirect("/")
+                return
+            request_id = str(uuid.uuid4())
+            payload_hash = secrets.token_bytes(32)
+            # 34-char T-prefixed placeholder. The mock-side respond
+            # handler suppresses the "differs from expected" warning
+            # when the queued address starts with "TPlaceholder" (real
+            # phone-derived addresses won't have this prefix). Pattern
+            # mirrors the ETH all-zero-bytes and SOL 24-ones placeholder
+            # suppression already in place.
+            placeholder_address = "TPlaceholder111111111111111111111A"
+            assert len(placeholder_address) == 34
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            message_text = f"Login to demo.recto.example at {ts} (TRON)"
+            with STATE._lock:
+                STATE.pending_requests[request_id] = {
+                    "request_id": request_id,
+                    "kind": "tron_sign",
+                    "service": "demo.recto.example",
+                    "secret": "tron-wallet-login",
+                    "context": {
+                        "child_pid": secrets.randbelow(60000) + 1000,
+                        "child_argv0": "browser",
+                        "requested_at_unix": int(time.time()),
+                        "operation_description": (
+                            f"TRON message_signing: {message_text!r}"
+                        ),
+                        "payload_hash_b64u": b64u_encode(payload_hash),
+                        # Six TRON context fields per the protocol RFC.
+                        "tron_network": "mainnet",
+                        "tron_message_kind": "message_signing",
+                        "tron_address": placeholder_address,
+                        "tron_derivation_path": "m/44'/195'/0'/0/0",
+                        "tron_message_text": message_text,
+                    },
+                    "_phone_id": target_phone["phone_id"],
+                    "_queued_at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                }
+            send_push_wakeup(target_phone, request_id, "tron_sign")
+            self._send_redirect("/")
+            return
+
         if url.path == "/_queue_eth_personal_sign":
             # v0.5+ ETH personal_sign request. Mints a fixed login-style
             # message, queues an eth_sign PendingRequest with the seven
@@ -1999,6 +2052,11 @@ class Handler(BaseHTTPRequestHandler):
             # as ETH/BTC.
             ed_signature_base64 = body.get("ed_signature_base64")
             ed_pubkey_hex = body.get("ed_pubkey_hex")
+            # Wave-9 TRON: opaque secp256k1 r||s||v signature (65 bytes
+            # hex) the phone produced over the TIP-191 hash. Same
+            # opaque-forwarding posture as ETH; the bootloader does NOT
+            # verify the secp256k1 sig itself (consumer's job).
+            tron_signature_rsv = body.get("tron_signature_rsv")
 
             if not phone_id or not decision:
                 self._send_json(400, {"error": "phone_id and decision are required"})
@@ -2246,6 +2304,108 @@ class Handler(BaseHTTPRequestHandler):
                                 )
                     except Exception as ex:  # noqa: BLE001
                         extra_response_fields["eth_recovery_error"] = str(ex)
+                elif kind == "tron_sign":
+                    # Wave-9 TRON message_signing. Same secp256k1 + Keccak-256
+                    # primitive as ETH but with TIP-191 preamble + base58check
+                    # T-prefixed addresses. The bootloader doesn't verify the
+                    # secp256k1 sig (consumer's job) but DOES recover-and-display
+                    # the signer's TRON address for the operator-UI panel so
+                    # "expected vs recovered" is eyeball-checkable. Failure
+                    # is non-fatal -- the protocol RFC says structure-check only.
+                    if not signature_b64u:
+                        self._send_json(400, {"error": "tron_sign approval requires signature_b64u (Ed25519 envelope)"})
+                        return
+                    if not tron_signature_rsv:
+                        self._send_json(400, {"error": "tron_sign approval requires tron_signature_rsv"})
+                        return
+                    rsv_clean_tron = (
+                        tron_signature_rsv[2:]
+                        if tron_signature_rsv.startswith(("0x", "0X"))
+                        else tron_signature_rsv
+                    )
+                    if len(rsv_clean_tron) != 130:
+                        self._send_json(400, {
+                            "error": (
+                                f"tron_signature_rsv must be 130 hex chars after "
+                                f"optional 0x prefix, got {len(rsv_clean_tron)}"
+                            ),
+                        })
+                        return
+                    try:
+                        bytes.fromhex(rsv_clean_tron)
+                    except ValueError as ex:
+                        self._send_json(400, {"error": f"tron_signature_rsv not hex: {ex}"})
+                        return
+                    if STATE.verify_signatures:
+                        try:
+                            pub_t = b64u_decode(target_phone["public_key_b64u"])
+                            sig_t = b64u_decode(signature_b64u)
+                            payload_hash_b64u_t = pending["context"].get(
+                                "payload_hash_b64u", ""
+                            )
+                            envelope_payload = b64u_decode(payload_hash_b64u_t)
+                            verified = verify_signature(
+                                target_phone["algorithm"],
+                                pub_t,
+                                envelope_payload,
+                                sig_t,
+                            )
+                            if not verified:
+                                self._send_json(400, {
+                                    "error": (
+                                        f"{target_phone['algorithm']} envelope sig "
+                                        f"does not verify against the registered "
+                                        f"phone's public key"
+                                    ),
+                                })
+                                return
+                        except Exception as ex:
+                            self._send_json(400, {"error": f"envelope verify failed: {ex}"})
+                            return
+                    extra_response_fields["tron_signature_rsv"] = tron_signature_rsv
+                    extra_response_fields["tron_network"] = pending["context"].get("tron_network")
+                    extra_response_fields["tron_message_kind"] = pending["context"].get("tron_message_kind")
+                    extra_response_fields["tron_address"] = pending["context"].get("tron_address")
+                    extra_response_fields["tron_message_text"] = pending["context"].get("tron_message_text")
+                    # Best-effort signer-address recovery for operator
+                    # display. If recto.tron is on PYTHONPATH, recover
+                    # the signer address from the TIP-191 hash + rsv and
+                    # surface it inline. Failure here is non-fatal.
+                    try:
+                        from recto.tron import (
+                            signed_message_hash as _tron_msg_hash,
+                            recover_address as _tron_recover_addr,
+                        )
+
+                        msg_text_tron = pending["context"].get(
+                            "tron_message_text", ""
+                        )
+                        digest_tron = _tron_msg_hash(
+                            msg_text_tron.encode("utf-8")
+                        )
+                        recovered_tron = _tron_recover_addr(
+                            digest_tron, tron_signature_rsv
+                        )
+                        extra_response_fields["tron_recovered_address"] = recovered_tron
+                        expected_addr_tron = (
+                            pending["context"].get("tron_address") or ""
+                        )
+                        # Suppress the match comparison when the queued
+                        # address is a placeholder. The operator-UI's
+                        # "/_queue_tron_message_sign" handler uses
+                        # "TPlaceholder111111111111111111111A" as the
+                        # placeholder; any real phone-derived address
+                        # won't match this prefix.
+                        if expected_addr_tron.startswith("TPlaceholder"):
+                            # Leave tron_address_match unset -- UI shows
+                            # "recovered: <addr>" without a marker.
+                            pass
+                        else:
+                            extra_response_fields["tron_address_match"] = (
+                                recovered_tron == expected_addr_tron
+                            )
+                    except Exception as ex:  # noqa: BLE001
+                        extra_response_fields["tron_recovery_error"] = str(ex)
                 elif kind == "btc_sign":
                     # v0.5+ Bitcoin signing capability. Same shape as
                     # eth_sign: phone derives a secp256k1 private key from
@@ -2921,6 +3081,61 @@ def render_index() -> str:
                 f"{sig_full_html_ed}"
                 f"{pub_full_html_ed}"
             )
+        if kind == "tron_sign":
+            # Wave-9 TRON message_signing render. Same shape as ETH
+            # (recover-and-display the signer's address) but with a
+            # T-prefixed base58check address and a TIP-191 hashed
+            # message instead of EIP-191. No chain-id since TRON's
+            # network distinction lives at RPC, not at the signature
+            # layer; tron_network ("mainnet" / "shasta" / "nile")
+            # surfaces here as the network label instead.
+            rsv_t = r.get("tron_signature_rsv") or ""
+            rsv_t_short = (
+                rsv_t[:14] + "&hellip;" + rsv_t[-6:]
+                if len(rsv_t) > 26 else rsv_t
+            )
+            network_tron = r.get("tron_network", "?")
+            msg_kind_tron = r.get("tron_message_kind", "?")
+            recovered_tron = r.get("tron_recovered_address")
+            msg_text_tron = r.get("tron_message_text") or ""
+            recovery_html_tron = ""
+            if recovered_tron:
+                if r.get("tron_address_match") is True:
+                    recovery_html_tron = (
+                        f" &mdash; recovered <code>{recovered_tron}</code> "
+                        f"<span class='verified'>matches expected</span>"
+                    )
+                elif r.get("tron_address_match") is False:
+                    expected = r.get("tron_address") or "?"
+                    recovery_html_tron = (
+                        f" &mdash; recovered <code>{recovered_tron}</code> "
+                        f"<span class='warn'>differs from expected {expected}</span>"
+                    )
+                else:
+                    recovery_html_tron = (
+                        f" &mdash; recovered <code>{recovered_tron}</code>"
+                    )
+            elif r.get("tron_recovery_error"):
+                recovery_html_tron = (
+                    f" &mdash; <span class='warn'>"
+                    f"address recovery failed: {r.get('tron_recovery_error')}</span>"
+                )
+            msg_text_html_tron = (
+                f"<br><span class='dim'>msg:</span> <code>{msg_text_tron}</code>"
+                if msg_text_tron else ""
+            )
+            rsv_full_html_tron = (
+                f"<br><span class='dim'>rsv (full):</span> "
+                f"<code style='word-break: break-all;'>{rsv_t}</code>"
+                if rsv_t else ""
+            )
+            return (
+                f"<strong>approved</strong> &mdash; TRON {msg_kind_tron} "
+                f"<code>{network_tron}</code>, rsv <code>{rsv_t_short}</code>"
+                f"{recovery_html_tron} &mdash; {verify_marker}"
+                f"{msg_text_html_tron}"
+                f"{rsv_full_html_tron}"
+            )
         return f"<strong>approved</strong> &mdash; kind <code>{kind}</code> &mdash; {verify_marker}"
 
     responses_html = "".join(
@@ -3039,6 +3254,9 @@ def render_index() -> str:
 </form>
 <form method="post" action="/_queue_xrp_message_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue XRP message_sign</button>
+</form>
+<form method="post" action="/_queue_tron_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue TRON message_sign</button>
 </form>
 <div class="dim" style="font-size: 0.85rem; margin-top: 0.4rem;">
   Sign request targets the most-recently-registered phone with a random managed secret.

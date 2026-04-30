@@ -1554,7 +1554,16 @@ class Handler(BaseHTTPRequestHandler):
             # launchers would pin the expected address from a
             # service.yaml entry; this is dev-tooling and stays loose.
             placeholder_address = "0x" + "00" * 20
-            chain_id = 8453  # Base mainnet (low-fee EVM-compatible L2; convenient default for dev)
+            # Wave-9 polish: chain_id from `?chain=<id>` query param, defaults
+            # to Base 8453. Operator UI's chain selector wires the dropdown
+            # value into each ETH form's action URL on submit. EIP-191
+            # personal_sign doesn't include chain_id in the signed preimage
+            # (purely metadata), so the signature itself is identical across
+            # chains -- but operators may still want to test the label flow.
+            try:
+                chain_id = int(parse_qs(url.query).get("chain", ["8453"])[0])
+            except (ValueError, TypeError):
+                chain_id = 8453
             message_text = (
                 f"Login to demo.recto.example "
                 f"at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -1601,7 +1610,15 @@ class Handler(BaseHTTPRequestHandler):
             request_id = str(uuid.uuid4())
             payload_hash = secrets.token_bytes(32)
             placeholder_address = "0x" + "00" * 20
-            chain_id = 8453  # Base mainnet
+            # Wave-9 polish: chain_id from `?chain=<id>` query param. Unlike
+            # personal_sign, EIP-712 typed_data DOES include chainId in the
+            # domain separator, so a different chain produces a different
+            # signed digest and therefore a different signature. Operator
+            # UI's chain selector lets you actually exercise that.
+            try:
+                chain_id = int(parse_qs(url.query).get("chain", ["8453"])[0])
+            except (ValueError, TypeError):
+                chain_id = 8453
             # Sample EIP-2612 permit — a common real-world EIP-712 use
             # case (ERC-20 token approval via off-chain signature). The
             # specific values are illustrative; cross-wallet compat is
@@ -1686,7 +1703,14 @@ class Handler(BaseHTTPRequestHandler):
             request_id = str(uuid.uuid4())
             payload_hash = secrets.token_bytes(32)
             placeholder_address = "0x" + "00" * 20
-            chain_id = 8453  # Base mainnet
+            # Wave-9 polish: chain_id from `?chain=<id>` query param.
+            # EIP-1559 transactions encode chainId directly into the RLP-
+            # signed payload (replay protection per EIP-155), so a different
+            # chain produces a completely different signed transaction.
+            try:
+                chain_id = int(parse_qs(url.query).get("chain", ["8453"])[0])
+            except (ValueError, TypeError):
+                chain_id = 8453
             recipient = "0x" + secrets.token_hex(20)
             transaction = {
                 "chainId": chain_id,
@@ -3222,15 +3246,49 @@ def render_index() -> str:
 <form method="post" action="/_queue_pgp_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue PGP sign</button>
 </form>
-<form method="post" action="/_queue_eth_personal_sign">
+<div style="display:inline-block; margin-right:0.5rem; padding:0.4rem 0.6rem; border:1px solid #888; border-radius:4px; background:#f7f7f7; vertical-align:middle;">
+  <label for="ethChainSel" style="font-size:0.9rem; color:#555; margin-right:0.4rem;">EVM chain:</label>
+  <select id="ethChainSel" onchange="_updateEthFormActions()" style="font-size:0.9rem; padding:0.15rem 0.3rem;">
+    <option value="1">Ethereum Mainnet (1)</option>
+    <option value="8453" selected>Base (8453)</option>
+    <option value="137">Polygon (137)</option>
+    <option value="42161">Arbitrum One (42161)</option>
+    <option value="10">Optimism (10)</option>
+    <option value="56">BNB Smart Chain (56)</option>
+    <option value="43114">Avalanche C-Chain (43114)</option>
+    <option value="11155111">Sepolia testnet (11155111)</option>
+    <option value="84532">Base Sepolia testnet (84532)</option>
+  </select>
+</div>
+<form id="_formEthPersonalSign" method="post" action="/_queue_eth_personal_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH personal_sign</button>
 </form>
-<form method="post" action="/_queue_eth_typed_data">
+<form id="_formEthTypedData" method="post" action="/_queue_eth_typed_data">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH typed_data (EIP-712)</button>
 </form>
-<form method="post" action="/_queue_eth_transaction">
+<form id="_formEthTransaction" method="post" action="/_queue_eth_transaction">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue ETH transaction (EIP-1559)</button>
 </form>
+<script>
+// Wave-9 polish: wire the EVM chain selector into the three ETH queue
+// form actions so each Queue button POSTs with ?chain=<id>. Server-side
+// handlers parse url.query for "chain" and fall back to 8453 (Base) if
+// absent. Same handler accepts every supported EVM chain ID; the
+// signature shape is identical across chains for personal_sign (where
+// chain is metadata only), but DIFFERS for typed_data (chainId in the
+// EIP-712 domain separator) and transaction (chainId in the RLP).
+function _updateEthFormActions() {
+  var sel = document.getElementById("ethChainSel");
+  var chain = sel ? sel.value : "8453";
+  var ids = ["_formEthPersonalSign", "_formEthTypedData", "_formEthTransaction"];
+  var bases = ["/_queue_eth_personal_sign", "/_queue_eth_typed_data", "/_queue_eth_transaction"];
+  for (var i = 0; i < ids.length; i++) {
+    var f = document.getElementById(ids[i]);
+    if (f) f.action = bases[i] + "?chain=" + encodeURIComponent(chain);
+  }
+}
+_updateEthFormActions();
+</script>
 <form method="post" action="/_queue_btc_message_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue BTC message_sign</button>
 </form>

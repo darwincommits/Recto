@@ -108,6 +108,36 @@ now bubble up to BaseHTTPRequestHandler's default exception
 handler (which writes tracebacks to stderr ->
 `~/recto-bootloader.log`). After the hotfix, smoke ran clean.
 
+**Full coin family hardware-proven same-session**: post-Wave-9
+smoke ran every card type end-to-end on the test device in a
+single ~60-second sweep, all approvals returning verified pills:
+TRON / XRP / XLM / SOL / BCH / DOGE / LTC / BTC / ETH transaction
+(EIP-1559) / ETH typed_data (EIP-712). Same paired phone, same
+BIP-39 mnemonic, all derived addresses matched their expected
+forms. Wave 6 + 7 + 8 + 9 all hardware-proven simultaneously --
+the Wave-7-retroactive BIP-137 header-byte fix (permanent fix
+for BCH/DOGE legacy P2PKH recovery) survived a clean rebuild
+cycle.
+
+**Known issue (non-blocking, banked for next session)**:
+immediately after the ETH typed_data (EIP-712) approval -- which
+ITSELF succeeded with a verified pill and correct recovered
+address -- the phone self-unpaired and reverted to the "Not paired
+yet" screen. VS console showed
+`System.Threading.Tasks.TaskCanceledException` on the next GET
+/v0.4/pending poll, immediately followed by `.NET TP Worker`
+exiting. Two leading hypotheses for next-session investigation:
+(a) post-approve render path triggers a component dispose that
+cancels the polling loop's CancellationToken, and some error path
+in the polling-loop catch interprets cancellation as "phone has
+been revoked, clear local state"; (b) `ApproveEthTypedDataAsync`
+has a kind-specific cleanup branch that wrongly clears pairing
+state on some condition I can't see without more logs. Either way
+it's a phone-side bug (the underlying signature flow is provably
+correct since the bootloader recorded the verified response before
+the unpair fired). Doesn't affect any other card type; phone
+re-pairs and continues working normally after restart.
+
 ### Added — Wave 9 part 1: TRON verifier + protocol DTOs (2026-04-30)
 
 Sister implementation of Wave 6 (ETH) and Wave 7 (BTC family) for

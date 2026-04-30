@@ -858,7 +858,7 @@ tron-branch exceptions bubble up to BaseHTTPRequestHandler's
 default exception handler (writes tracebacks to stderr -> log).
 
 **Cross-wave priorities still unblocked** (unchanged from Wave 8
-closure):
+closure, plus one new banked-for-investigation item):
 - Capability-JWT scope semantics for agent signing (AllThruitCoin
   Phase 5 unlock).
 - Mnemonic export/import ceremony UIs.
@@ -866,6 +866,20 @@ closure):
 - PSBT (BIP-174) signing.
 - Friendlier `OSStatus -25293` translation in iOS Secure Enclave
   catch path.
+- **Investigate phone-side auto-unpair after ETH typed_data
+  approval** (banked 2026-04-30 during the post-Wave-9 full-
+  coin-family smoke). Signature flow itself works correctly --
+  bootloader recorded the verified response before the unpair
+  fired -- but the next polling-loop iteration's
+  `TaskCanceledException` ends with the phone reverting to "Not
+  paired yet". Two leading hypotheses: (a) post-approve render
+  path disposes the page component, cancelling the polling
+  CancellationToken, and a catch path in the polling loop wrongly
+  interprets cancellation as "phone has been revoked"; (b)
+  `ApproveEthTypedDataAsync` has a kind-specific cleanup branch
+  that wrongly clears pairing state. Phone-side bug only; other
+  card types unaffected. Repro: queue ETH typed_data after pairing,
+  approve on phone, watch for self-unpair on the next GET /pending.
 
 ---
 

@@ -864,10 +864,10 @@ address, and sign-then-verify round-trips. Protocol DTOs in
 `PendingRequest.new_tron(...)` + `_pending_to_wire` emit + 
 `_handle_respond` structure-check + `_notify_resolved` extension.
 Mock bootloader gained a queue endpoint, button, verifier branch,
-and recent-responses display row. Erik validated end-to-end on
-Windows: 22/22 tests pass, MAUI loads fine, paired phone fetches
-the queued `tron_sign` request (rendered as "Unknown request kind"
-because Wave 9 part 2's render arm hadn't shipped yet -- exactly
+and recent-responses display row. Operator validated end-to-end on
+the dev workstation: 22/22 tests pass, MAUI loads fine, paired phone
+fetches the queued `tron_sign` request (rendered as "Unknown request
+kind" because Wave 9 part 2's render arm hadn't shipped yet -- exactly
 the expected state at the part-1 boundary).
 
 ---

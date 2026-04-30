@@ -187,6 +187,55 @@ during the Tier-1 v1-readiness sprint).
   `dotnet workload update` + `dotnet workload install maui-ios` is a
   less-surgical fallback.
 
+- **`dotnet publish -f net10.0-ios` on macOS errors with `NETSDK1100:
+  To build a project targeting Windows on this operating system, set
+  the EnableWindowsTargeting property to true` even though we're
+  publishing for iOS, not Windows.** Cause: the MAUI host csproj has
+  multiple `<TargetFrameworks>` (iOS / Android / Mac Catalyst /
+  Windows). MSBuild's Restore step evaluates the entire framework
+  graph regardless of which `-f` you pass at publish time, and the
+  Windows target's targeting pack isn't on macOS. **Fix:** pass
+  `-p:EnableWindowsTargeting=true` to allow Restore to evaluate the
+  Windows-target metadata (which is just graph-evaluation; nothing
+  Windows-specific gets compiled when publishing for iOS):
+  `dotnet publish Recto.csproj -f net10.0-ios -c Release -r ios-arm64
+  -p:EnableWindowsTargeting=true`. The flag is harmless on a Windows
+  host too, so the same command works cross-platform. Caught wave-9
+  part 2 (2026-04-30) on first iOS publish attempt from the macOS
+  build host.
+
+- **`codesign exited with code 1: resource fork, Finder information,
+  or similar detritus not allowed` mid-publish.** macOS extended
+  attributes (xattrs) accumulated on files in the build output;
+  `codesign` refuses to sign anything carrying
+  `com.apple.FinderInfo` / `com.apple.quarantine` / resource-fork
+  metadata. xattrs leak in from Finder operations, downloads (the
+  quarantine bit), and sometimes from `git pull` on certain
+  filesystems. **Fix:** strip xattrs from the source tree, blow
+  away `bin/` + `obj/`, rebuild:
+  ```
+  cd <repo root>
+  xattr -cr . 2>/dev/null
+  cd <maui project dir>
+  rm -rf bin obj
+  dotnet publish Recto.csproj -f net10.0-ios -c Release -r ios-arm64 -p:EnableWindowsTargeting=true
+  ```
+  The `2>/dev/null` discards "Permission denied" chatter on
+  `.git/objects/*` files (intentionally chmod 444 — xattrs can't
+  touch them, but they never end up in the .app bundle so codesign
+  never sees them; the noise is harmless). The `bin obj` cleanup is
+  load-bearing — xattrs from a previous failed build can survive
+  in the publish output and get re-bundled into the next attempt's
+  .app. If a future build hits the same error after a clean
+  `xattr -cr`, the next layer is usually a single source file
+  carrying a quarantine xattr that's getting copied into the .app:
+  `find ./bin -exec xattr -l {} \;` after a partial build shows
+  which file still carries metadata. Caught wave-9 part 2
+  (2026-04-30) on first iOS publish attempt; same root-cause
+  family as the EnableWindowsTargeting gotcha above (both bit on
+  the first cross-platform-MAUI publish from a fresh macOS build
+  context).
+
 - **iOS Simulator builds need ad-hoc signing, not no-signing —
   setting `EnableCodeSigning=false` produces an unsigned binary that
   the simulator refuses to launch.** Two failure modes ride on the

@@ -2338,30 +2338,27 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     if STATE.verify_signatures:
                         try:
-                            pub_t = b64u_decode(target_phone["public_key_b64u"])
+                            pub_t = b64u_decode(phone["public_key_b64u"])
                             sig_t = b64u_decode(signature_b64u)
-                            payload_hash_b64u_t = pending["context"].get(
-                                "payload_hash_b64u", ""
+                            envelope_payload = b64u_decode(
+                                pending["context"]["payload_hash_b64u"]
                             )
-                            envelope_payload = b64u_decode(payload_hash_b64u_t)
-                            verified = verify_signature(
-                                target_phone["algorithm"],
-                                pub_t,
-                                envelope_payload,
-                                sig_t,
-                            )
-                            if not verified:
-                                self._send_json(400, {
-                                    "error": (
-                                        f"{target_phone['algorithm']} envelope sig "
-                                        f"does not verify against the registered "
-                                        f"phone's public key"
-                                    ),
-                                })
-                                return
                         except Exception as ex:
-                            self._send_json(400, {"error": f"envelope verify failed: {ex}"})
+                            self._send_json(400, {"error": f"base64url decode failed: {ex}"})
                             return
+                        verified = verify_signature(
+                            phone["algorithm"], pub_t, envelope_payload, sig_t
+                        )
+                        if not verified:
+                            self._send_json(400, {
+                                "error": (
+                                    f"{phone['algorithm']} signature does not verify "
+                                    f"against the registered public key for this phone"
+                                ),
+                            })
+                            return
+                    else:
+                        verified = True
                     extra_response_fields["tron_signature_rsv"] = tron_signature_rsv
                     extra_response_fields["tron_network"] = pending["context"].get("tron_network")
                     extra_response_fields["tron_message_kind"] = pending["context"].get("tron_message_kind")

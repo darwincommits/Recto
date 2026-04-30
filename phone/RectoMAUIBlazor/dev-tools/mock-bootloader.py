@@ -3203,11 +3203,35 @@ def render_index() -> str:
   .dim {{ color: #999; }}
   .warn {{ color: #b85c00; }}
   .verified {{ color: #1d7f3a; }}
-  form {{ display: inline-block; margin-right: 0.5rem; }}
-  button {{ padding: 0.4rem 0.9rem; font-size: 0.95rem; cursor: pointer;
+  form {{ display: inline-block; margin: 0 0.5rem 0.5rem 0; }}
+  button {{ padding: 0.65rem 0.9rem; font-size: 0.95rem; cursor: pointer;
             border: 1px solid #999; background: #fafafa; border-radius: 4px; }}
   button:hover {{ background: #f0f0f0; }}
   button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+  /* Wave-9 polish: section-boxes split the request-queueing buttons
+     into Identity (single_sign / TOTP / session / WebAuthn / PKCS#11 /
+     PGP) and Cryptocurrencies (EVM + Bitcoin family + ed25519 chains
+     + TRON), mirroring the phone-side Home.razor layout. */
+  .section-box {{
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 0.75rem 1rem 0.4rem 1rem;
+    margin: 0.5rem 0 1rem 0;
+    background: #fcfcfc;
+  }}
+  .section-box-title {{
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #555;
+    margin-bottom: 0.6rem;
+  }}
+  .section-box-identity {{ border-color: #b8c4d4; background: #f4f7fb; }}
+  .section-box-identity .section-box-title {{ color: #2e4a73; }}
+  .section-box-crypto   {{ border-color: #d4b88c; background: #fbf6ec; }}
+  .section-box-crypto .section-box-title {{ color: #6b4a17; }}
 </style>
 </head><body>
 <h1>Mock Recto bootloader</h1>
@@ -3225,6 +3249,9 @@ def render_index() -> str:
 
 <h2>Pending requests</h2>
 <ul>{pending_html}</ul>
+
+<div class="section-box section-box-identity">
+<span class="section-box-title">Identity &amp; access</span>
 <form method="post" action="/_queue">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue sign request</button>
 </form>
@@ -3246,6 +3273,10 @@ def render_index() -> str:
 <form method="post" action="/_queue_pgp_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue PGP sign</button>
 </form>
+</div><!-- /section-box-identity -->
+
+<div class="section-box section-box-crypto">
+<span class="section-box-title">Crypto tokens</span>
 <div style="display:inline-block; margin-right:0.5rem; padding:0.4rem 0.6rem; border:1px solid #888; border-radius:4px; background:#f7f7f7; vertical-align:middle;">
   <label for="ethChainSel" style="font-size:0.9rem; color:#555; margin-right:0.4rem;">EVM chain:</label>
   <select id="ethChainSel" onchange="_updateEthFormActions()" style="font-size:0.9rem; padding:0.15rem 0.3rem;">
@@ -3337,6 +3368,8 @@ _updateEthFormActions();
 <form method="post" action="/_queue_tron_message_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue TRON message_sign</button>
 </form>
+</div><!-- /section-box-crypto -->
+
 <div class="dim" style="font-size: 0.85rem; margin-top: 0.4rem;">
   Sign request targets the most-recently-registered phone with a random managed secret.
   TOTP provision mints a fresh random base32 secret and stores it server-side for later code verification.

@@ -796,7 +796,83 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Wave 9: TRON — part 1 SHIPPED 2026-04-30 (Python verifier + protocol DTOs + mock-bootloader integration); part 2 (C# phone-side) next
+## Active sprint — Wave 9: TRON — parts 1 + 2 SHIPPED 2026-04-30; iPhone smoke pending
+
+Wave 9 follows the Wave 6/7/8 split pattern: Python verifier
++ protocol DTOs landed first (commit earlier today), C# phone-side
+landed in this commit. Wave 9 takes coin coverage from 19/21 (90.5%,
+post-Wave 8) to 20/21 (95.2%) end-to-end (phone-side signing AND
+Python-side verification). Cardano (ADA, the remaining 1) ships in
+Wave 10 when its custom SLIP-23 / CIP-1852 derivation lands.
+
+**Wave 9 part 2 deliverables (this commit)** -- full detail in
+CHANGELOG.md `[Unreleased]`:
+
+- `Recto.Shared/Services/TronSigningOps.cs` (math layer): TIP-191
+  hash with the load-bearing leading 0x19 byte, base58check encoder
+  (Bitcoin alphabet + double-SHA-256 checksum), TRON address
+  derivation from 64-byte uncompressed pubkey, sign + recover
+  delegating to `EthSigningOps` (same secp256k1 curve and
+  v-recovery pipeline byte-for-byte).
+- `Recto.Shared/Services/ITronSignService.cs` interface +
+  `Recto.Shared/Models/TronAccount.cs` value object.
+- `Recto/Services/MauiTronSignService.cs` SecureStorage-backed
+  orchestrator -- reads the SHARED mnemonic
+  (`recto.phone.eth.mnemonic.{alias}`) that ETH/BTC/ED already
+  provision; derives at `m/44'/195'/0'/0/N`. One mnemonic, nine
+  chain trees (ETH, BTC, LTC, DOGE, BCH, SOL, XLM, XRP, TRON).
+- Protocol DTOs: `PendingRequestKind.TronSign`, `TronMessageKind`,
+  `TronNetwork` enums in `PendingRequest.cs`; six `tron_*` fields
+  on `PendingRequestContext`; `TronSignatureRsv` on `RespondRequest`.
+- `Home.razor`: TRON render arm + `ApproveTronSignAsync` dispatcher
+  + `PopulateTronAddressesAsync` hooked into `RefreshPendingAsync`
+  + per-coin helpers (`_tronMessageKindLabel`, `_tronNetworkLabel`)
+  + `IsTokenSigningKind` extended + new red TRX badge.
+- `app.css` + `Home.razor.css`: `--rec-coin-tron` Tronix-red
+  variable + `.rec-coin-badge-tron` class.
+- `MauiProgram.cs`: `ITronSignService` -> `MauiTronSignService`
+  cross-platform singleton DI registration.
+- `Recto.Shared.Tests/TronSigningOpsTests.cs`: 11 tests pinning the
+  canonical generator-G TRON address (cross-pinned with
+  `tests/test_tron.py`'s `TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC`),
+  TIP-191 hash distinctness vs EIP-191, ASCII-decimal length-byte
+  encoding, sign-then-recover round-trip.
+
+**iPhone smoke pending**: rebuild MAUI on MAC, redeploy to the
+test device, queue a `tron_sign` from the mock bootloader operator
+UI, approve on the phone, confirm the `tron_recovered_address`
+matches the phone-derived address (green "verified" pill, no amber
+"differs from expected" warning).
+
+**Cross-wave priorities still unblocked** (unchanged from Wave 8
+closure):
+- Capability-JWT scope semantics for agent signing (AllThruitCoin
+  Phase 5 unlock).
+- Mnemonic export/import ceremony UIs.
+- Multi-account picker.
+- PSBT (BIP-174) signing.
+- Friendlier `OSStatus -25293` translation in iOS Secure Enclave
+  catch path.
+
+---
+
+## Prior sprint — Wave 9 part 1 (Python verifier + protocol DTOs + mock-bootloader integration, 2026-04-30)
+
+Foundation pass for Wave 9. The Python verifier shipped with 22
+tests covering TIP-191 hash pinning, the canonical generator-G TRON
+address, and sign-then-verify round-trips. Protocol DTOs in
+`PendingRequest.new_tron(...)` + `_pending_to_wire` emit + 
+`_handle_respond` structure-check + `_notify_resolved` extension.
+Mock bootloader gained a queue endpoint, button, verifier branch,
+and recent-responses display row. Erik validated end-to-end on
+Windows: 22/22 tests pass, MAUI loads fine, paired phone fetches
+the queued `tron_sign` request (rendered as "Unknown request kind"
+because Wave 9 part 2's render arm hadn't shipped yet -- exactly
+the expected state at the part-1 boundary).
+
+---
+
+## Prior sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — parts 1 + 2 SHIPPED 2026-04-29; iPhone smoke VALIDATED 2026-04-30; cross-wallet interop deferred
 
 Wave 9 follows the Wave 6/7/8 split pattern: Python verifier
 + protocol DTOs ship first (this commit), C# phone-side ships

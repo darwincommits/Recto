@@ -7,6 +7,86 @@ and Recto adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Wave 9 part 2: TRON C# phone-side (2026-04-30)
+
+Closes the loop on Wave 9. Wave 9 part 1 (Python verifier + protocol
+DTOs + mock-bootloader) shipped earlier today; this commit ships the
+phone-side C# implementation that produces a TIP-191 signature the
+Wave 9 part 1 verifier accepts.
+
+**Coverage**: 20/21 target coins now have phone-side signing AND
+Python-side verification. Smoke validation against the test device
+pending; mock-bootloader operator-UI already shows the queued
+`tron_sign` request correctly (proves Wave 9 part 1's
+`PendingRequestContext` emit is right -- just had no render arm
+for it before this commit).
+
+**Architecture**: TRON shares secp256k1 + Keccak-256 with Ethereum
+byte-for-byte. The C# implementation reuses
+`EthSigningOps.SignWithRecovery` + `EthSigningOps.Keccak256` directly;
+net-new is the TIP-191 preamble (`"TRON Signed Message:\n"` instead
+of EIP-191's `"Ethereum Signed Message:\n"`) and the base58check
+address encoding with version byte 0x41. Same one-mnemonic-shared-
+across-services posture as ETH/BTC/ED -- the new
+`MauiTronSignService` reads the same SecureStorage entry
+(`recto.phone.eth.mnemonic.{alias}`) those services already
+provision. One mnemonic, nine chain trees now: ETH, BTC, LTC, DOGE,
+BCH, SOL, XLM, XRP, TRON.
+
+**Wave 9 part 2 deliverables**:
+
+- `Recto.Shared/Services/TronSigningOps.cs` -- TIP-191 hash with the
+  load-bearing leading 0x19 byte, base58check encoder (Bitcoin
+  alphabet + double-SHA-256 checksum), TRON address derivation
+  from 64-byte uncompressed pubkey, sign + recover delegating to
+  `EthSigningOps`. Pure BouncyCastle / SHA-256 math; no platform-
+  specific code.
+- `Recto.Shared/Services/ITronSignService.cs` -- five-method
+  interface (EnsureMnemonicAsync / GetAccountAsync / ExistsAsync /
+  SignMessageAsync / ClearAsync) mirroring `IEthSignService`'s
+  message_signing subset. Transaction signing reserved for a
+  follow-up wave.
+- `Recto.Shared/Models/TronAccount.cs` -- value object with
+  `DerivationPath` + `Address` (T-prefixed 34-char base58check).
+- `Recto/Services/MauiTronSignService.cs` -- SecureStorage-backed
+  orchestrator. Mirrors `MauiEthSignService` shape; reads the
+  shared mnemonic, derives at `m/44'/195'/0'/0/N` via existing
+  `Bip32`, signs via `TronSigningOps.SignWithRecovery`. Wipes seed
+  + leaf private key + chain code in `finally` blocks.
+- `Recto.Shared/Protocol/V04/PendingRequest.cs` --
+  `PendingRequestKind.TronSign` constant, `TronMessageKind` enum
+  (MessageSigning / Transaction-reserved), `TronNetwork` enum
+  (Mainnet / Shasta / Nile).
+- `Recto.Shared/Protocol/V04/PendingRequestContext.cs` -- six new
+  optional `tron_*` fields mirroring the Python state.py shape.
+- `Recto.Shared/Protocol/V04/RespondRequest.cs` -- new
+  `TronSignatureRsv` field for the 65-byte r||s||v hex.
+- `Recto.Shared/Pages/Home.razor` -- TRON render arm in the
+  Pending Requests switch (red TRX badge, network label, derivation
+  path, pre-derived address, message text), `ApproveTronSignAsync`
+  dispatcher producing the dual signature (TIP-191 r||s||v + Ed25519
+  envelope), `PopulateTronAddressesAsync` hooked into
+  `RefreshPendingAsync`, helper labels (`_tronMessageKindLabel`,
+  `_tronNetworkLabel`), `IsTokenSigningKind` extended.
+- `Recto.Shared/wwwroot/app.css` + `Recto.Shared/Pages/Home.razor.css`
+  -- new `--rec-coin-tron` CSS variable (Tronix-red `#ec0a1e`) and
+  `.rec-coin-badge-tron` class.
+- `Recto/MauiProgram.cs` -- DI registration for
+  `ITronSignService` -> `MauiTronSignService` as a cross-platform
+  singleton.
+- `Recto.Shared.Tests/TronSigningOpsTests.cs` -- 11 tests pinning
+  the canonical generator-G TRON address against the same Wave 9
+  part 1 vector
+  (`TMVQGm1qAQYVdetCeGRRkTWYYrLXuHK2HC`), confirming the 20-byte
+  hash160-equivalent matches Ethereum's address bytes for the same
+  pubkey, validating the TIP-191 length-byte ASCII-decimal
+  encoding, distinctness vs EIP-191, sign-then-recover round-trip.
+
+**Validation pending**: rebuild MAUI on MAC, redeploy to the test
+device, queue a `tron_sign` from the mock bootloader operator UI,
+approve on the phone, confirm the `tron_recovered_address` matches
+the phone-derived address (no amber warning, green "verified" pill).
+
 ### Added — Wave 9 part 1: TRON verifier + protocol DTOs (2026-04-30)
 
 Sister implementation of Wave 6 (ETH) and Wave 7 (BTC family) for

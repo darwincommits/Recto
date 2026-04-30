@@ -52,7 +52,16 @@ public sealed record RespondRequest(
     [property: JsonPropertyName("eth_signature_rsv")] string? EthSignatureRsv = null,
     [property: JsonPropertyName("btc_signature_base64")] string? BtcSignatureBase64 = null,
     [property: JsonPropertyName("ed_signature_base64")] string? EdSignatureBase64 = null,
-    [property: JsonPropertyName("ed_pubkey_hex")] string? EdPubkeyHex = null);
+    [property: JsonPropertyName("ed_pubkey_hex")] string? EdPubkeyHex = null,
+    // Wave 9: TRON 65-byte r||s||v secp256k1 signature, hex-encoded
+    // with optional 0x prefix (130 hex chars after prefix). Set only
+    // when responding to a tron_sign approval; null otherwise. Same
+    // shape as EthSignatureRsv since both chains share the secp256k1
+    // + low-s + canonical-v pipeline. Bootloader structure-checks
+    // (130 hex chars, valid hex) and forwards opaque to the
+    // consumer; signer-address recovery happens consumer-side via
+    // recto.tron.recover_address.
+    [property: JsonPropertyName("tron_signature_rsv")] string? TronSignatureRsv = null);
 
 public static class RespondDecision
 {

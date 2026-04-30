@@ -64,6 +64,10 @@
     --rec-coin-sol:     #9945ff;
     --rec-coin-xlm:     #14b6e7;
     --rec-coin-xrp:     #23292f;
+    /* Wave 9: TRON. Tronix red = Tron Foundation brand color
+       (#ff060a as published; we use a slightly desaturated form
+       so it sits comfortably alongside the indigo vault chrome). */
+    --rec-coin-tron:    #ec0a1e;
 
     /* ---- Typography ---- */
     --rec-font-sans:    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;

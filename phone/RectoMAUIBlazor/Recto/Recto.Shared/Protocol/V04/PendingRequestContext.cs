@@ -158,7 +158,21 @@ public sealed record PendingRequestContext(
     [property: JsonPropertyName("ed_address")] string? EdAddress = null,
     [property: JsonPropertyName("ed_derivation_path")] string? EdDerivationPath = null,
     [property: JsonPropertyName("ed_message_text")] string? EdMessageText = null,
-    [property: JsonPropertyName("ed_payload_hex")] string? EdPayloadHex = null);
+    [property: JsonPropertyName("ed_payload_hex")] string? EdPayloadHex = null,
+    // Wave 9: TRON-specific context. Six optional fields populated
+    // only when kind == "tron_sign". Same secp256k1 + Keccak-256
+    // primitive as eth_sign; net-new is the TIP-191 preamble +
+    // base58check address + SLIP-0044 coin-type 195 BIP-32 path.
+    // Address is 34-char T-prefixed base58check (mainnet version
+    // byte 0x41; Shasta + Nile testnets share the same byte).
+    // tron_message_text is the raw string the operator approves
+    // signing; the phone TIP-191-hashes + signs at request time.
+    [property: JsonPropertyName("tron_network")] string? TronNetwork = null,
+    [property: JsonPropertyName("tron_message_kind")] string? TronMessageKind = null,
+    [property: JsonPropertyName("tron_address")] string? TronAddress = null,
+    [property: JsonPropertyName("tron_derivation_path")] string? TronDerivationPath = null,
+    [property: JsonPropertyName("tron_message_text")] string? TronMessageText = null,
+    [property: JsonPropertyName("tron_payload_hex")] string? TronPayloadHex = null);
 
 public static class PgpOperation
 {

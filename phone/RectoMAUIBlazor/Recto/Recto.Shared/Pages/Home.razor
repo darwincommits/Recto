@@ -15,6 +15,7 @@
 @inject IEthSignService EthSigner
 @inject IBtcSignService BtcSigner
 @inject IEd25519ChainSignService EdSigner
+@inject ITronSignService TronSigner
 @inject IPinningService Pinning
 @inject IPairingStateService Pairing
 @inject IPushTokenService PushTokens
@@ -422,6 +423,38 @@
                                                 <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
                                             }
                                             break;
+                                        case PendingRequestKind.TronSign:
+                                            // Wave 9: TRON message_signing. Same secp256k1 +
+                                            // Keccak-256 primitive as ETH but with TIP-191 preamble
+                                            // and base58check T-prefixed addresses. No chainId since
+                                            // TRON's network distinction lives at RPC, not at the
+                                            // signature layer; we surface tron_network as the label.
+                                            <p class="mb-1 fw-semibold">
+                                                <span class="rec-coin-badge rec-coin-badge-tron">TRX</span>@(_tronMessageKindLabel(req.Context.TronMessageKind))
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Network: <code>@(_tronNetworkLabel(req.Context.TronNetwork))</code>
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Path: <code>@(req.Context.TronDerivationPath ?? "m/44'/195'/0'/0/0")</code>
+                                            </p>
+                                            @if (_tronAddressByRequestId.TryGetValue(req.RequestId, out var tronDerivedAddr))
+                                            {
+                                                <p class="mb-1 text-muted small" style="word-break: break-all;">
+                                                    Address: <code>@tronDerivedAddr</code>
+                                                </p>
+                                            }
+                                            @if (req.Context.TronMessageKind == TronMessageKind.MessageSigning && !string.IsNullOrEmpty(req.Context.TronMessageText))
+                                            {
+                                                <p class="mb-2 text-muted small" style="white-space: pre-wrap; word-break: break-word;">
+                                                    <strong>Message:</strong> @req.Context.TronMessageText
+                                                </p>
+                                            }
+                                            else
+                                            {
+                                                <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
+                                            }
+                                            break;
                                         default:
                                             <p class="mb-1 fw-semibold">Unknown request kind: <code>@req.Kind</code></p>
                                             <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
@@ -649,6 +682,11 @@
     // families now: ETH/BTC/LTC/DOGE/BCH/SOL/XLM/XRP). Same alias
     // again — three services point at the same row in storage.
     private const string EdKeyAlias = "default";
+    // Wave 9: TRON service shares the same SecureStorage entry as
+    // ETH / BTC / ED. One mnemonic, nine chain trees now (ETH, BTC,
+    // LTC, DOGE, BCH, SOL, XLM, XRP, TRON). Same alias again -- four
+    // services pointing at the same row in storage.
+    private const string TronKeyAlias = "default";
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3);
 
     // Dev default points at the mock bootloader (phone/dev-tools/mock-bootloader.py).
@@ -676,6 +714,10 @@
     // addresses (SOL base58 / XLM StrKey / XRP classic) for pending
     // ed_sign requests, keyed by request_id.
     private Dictionary<string, string> _edAddressByRequestId = new();
+    // Wave 9: same pattern for TRON. Pre-derived T-prefixed
+    // base58check addresses for pending tron_sign requests, keyed
+    // by request_id.
+    private Dictionary<string, string> _tronAddressByRequestId = new();
     private string? _processingRequestId;
     private string _processingText = string.Empty;
     private string? _pollingError;
@@ -913,6 +955,9 @@
                     break;
                 case PendingRequestKind.EdSign:
                     await ApproveEdSignAsync(req);
+                    break;
+                case PendingRequestKind.TronSign:
+                    await ApproveTronSignAsync(req);
                     break;
                 default:
                     _pollingError = $"Cannot approve unknown request kind '{req.Kind}'.";
@@ -1245,6 +1290,91 @@
             Decision: RespondDecision.Approved,
             SignatureB64u: Base64UrlEncode(enclaveSignResult.Value),
             EthSignatureRsv: rsvHex);
+        var respondResult = await BootloaderClient.RespondAsync(
+            _paired.BootloaderUrl, req.RequestId, respondReq, CancellationToken.None);
+        if (respondResult.IsFailure)
+        {
+            _pollingError = respondResult.Error.Message;
+            return;
+        }
+        await RefreshPendingAsync(CancellationToken.None);
+    }
+
+    private async Task ApproveTronSignAsync(PendingRequest req)
+    {
+        // Wave 9 part 2: TRON message_signing. Same secp256k1 +
+        // Keccak-256 + RFC 6979 pipeline as ETH personal_sign; the
+        // only differences are the TIP-191 preamble (handled inside
+        // TronSigningOps.SignedMessageHash) and the BIP-44 path
+        // (m/44'/195'/0'/0/N -- SLIP-0044 coin-type 195). Phone
+        // produces the standard r||s||v hex AND the Ed25519 envelope
+        // over payload_hash_b64u; bootloader forwards both to the
+        // verifier opaquely.
+        var msgKind = req.Context.TronMessageKind;
+        if (string.IsNullOrEmpty(msgKind))
+        {
+            _pollingError = "tron_sign request missing tron_message_kind.";
+            return;
+        }
+        if (msgKind != TronMessageKind.MessageSigning)
+        {
+            // tron_message_kind="transaction" is reserved at the
+            // protocol layer (recto.bootloader.state.new_tron refuses
+            // it). The phone-side check here is belt-and-suspenders.
+            _pollingError = $"tron_sign kind '{msgKind}' is not yet supported (only 'message_signing' is wired).";
+            return;
+        }
+        if (string.IsNullOrEmpty(req.Context.TronMessageText))
+        {
+            _pollingError = "tron_sign message_signing request missing tron_message_text.";
+            return;
+        }
+        if (string.IsNullOrEmpty(req.Context.PayloadHashB64u))
+        {
+            _pollingError = "tron_sign request missing payload_hash_b64u (Ed25519 envelope binding).";
+            return;
+        }
+
+        var derivationPath = string.IsNullOrEmpty(req.Context.TronDerivationPath)
+            ? "m/44'/195'/0'/0/0"
+            : req.Context.TronDerivationPath!;
+
+        _processingText = "Signing with TRON key (TIP-191)...";
+        StateHasChanged();
+        await Task.Yield();
+
+        var signResult = await TronSigner.SignMessageAsync(
+            TronKeyAlias, derivationPath, req.Context.TronMessageText!, CancellationToken.None);
+        if (signResult.IsFailure)
+        {
+            _pollingError = signResult.Error.Message;
+            return;
+        }
+        var rsvHex = signResult.Value;
+
+        byte[] payloadHash;
+        try { payloadHash = Base64UrlDecode(req.Context.PayloadHashB64u!); }
+        catch (Exception ex)
+        {
+            _pollingError = $"Could not decode payload hash: {ex.Message}";
+            return;
+        }
+        _processingText = "Awaiting biometric...";
+        StateHasChanged();
+        var enclaveSignResult = await EnclaveKeys.SignAsync(KeyAlias, payloadHash, CancellationToken.None);
+        if (enclaveSignResult.IsFailure)
+        {
+            _pollingError = enclaveSignResult.Error.Message;
+            return;
+        }
+
+        _processingText = "Sending response...";
+        StateHasChanged();
+        var respondReq = new RespondRequest(
+            PhoneId: _paired!.PhoneId,
+            Decision: RespondDecision.Approved,
+            SignatureB64u: Base64UrlEncode(enclaveSignResult.Value),
+            TronSignatureRsv: rsvHex);
         var respondResult = await BootloaderClient.RespondAsync(
             _paired.BootloaderUrl, req.RequestId, respondReq, CancellationToken.None);
         if (respondResult.IsFailure)
@@ -1656,6 +1786,7 @@
             await PopulateEthAddressesAsync(_pending, ct);
             await PopulateBtcAddressesAsync(_pending, ct);
             await PopulateEdAddressesAsync(_pending, ct);
+            await PopulateTronAddressesAsync(_pending, ct);
         }
         else
         {
@@ -1746,6 +1877,31 @@
             }
         }
         _edAddressByRequestId = newMap;
+    }
+
+    /// <summary>
+    /// Wave 9: pre-derive TRON addresses for every pending tron_sign
+    /// request so the render arm can show "Address: T..." inline
+    /// without doing async work inside the @switch. Same shape as
+    /// PopulateEthAddressesAsync; only the service + path defaults
+    /// differ.
+    /// </summary>
+    private async Task PopulateTronAddressesAsync(List<PendingRequest> pending, CancellationToken ct)
+    {
+        var newMap = new Dictionary<string, string>();
+        foreach (var req in pending)
+        {
+            if (req.Kind != PendingRequestKind.TronSign) continue;
+            var path = string.IsNullOrEmpty(req.Context.TronDerivationPath)
+                ? "m/44'/195'/0'/0/0"
+                : req.Context.TronDerivationPath!;
+            var account = await TronSigner.EnsureMnemonicAsync(TronKeyAlias, path, ct);
+            if (account.IsSuccess)
+            {
+                newMap[req.RequestId] = account.Value.Address;
+            }
+        }
+        _tronAddressByRequestId = newMap;
     }
 
     private async Task HandleRetryPollAsync()
@@ -1878,7 +2034,27 @@
         PendingRequestKind.EthSign => true,
         PendingRequestKind.BtcSign => true,
         PendingRequestKind.EdSign => true,
+        PendingRequestKind.TronSign => true,
         _ => false,
+    };
+
+    /// <summary>Wave 9: short label for the TRON message_kind discriminator.</summary>
+    private static string _tronMessageKindLabel(string? kind) => kind switch
+    {
+        TronMessageKind.MessageSigning => " message_signing",
+        TronMessageKind.Transaction => " transaction",
+        _ => " sign",
+    };
+
+    /// <summary>Wave 9: short label for the TRON network discriminator.
+    /// All three TRON networks share the same address-version byte and
+    /// signed-message preamble; the label is operator-display-only.</summary>
+    private static string _tronNetworkLabel(string? network) => network switch
+    {
+        TronNetwork.Mainnet => "mainnet",
+        TronNetwork.Shasta => "shasta (testnet)",
+        TronNetwork.Nile => "nile (testnet)",
+        _ => network ?? "?",
     };
 
     private static string _ethChainLabel(long? chainId) => chainId switch

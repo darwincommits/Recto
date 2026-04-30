@@ -145,6 +145,21 @@ public static class PendingRequestKind
     /// explicitly for protocol uniformity across the three chains).
     /// </summary>
     public const string EdSign = "ed_sign";
+
+    /// <summary>
+    /// Wave 9: TRON signing. The phone holds a secp256k1 BIP-32 tree
+    /// at <c>m/44'/195'/0'/0/N</c> (SLIP-0044 coin-type 195) derived
+    /// from the SAME BIP-39 mnemonic as <see cref="EthSign"/> /
+    /// <see cref="BtcSign"/> / <see cref="EdSign"/>. The phone signs
+    /// the TIP-191 hash (structurally identical to EIP-191 with the
+    /// preamble swapped to <c>"TRON Signed Message:\n"</c>) and
+    /// returns a 65-byte <c>r||s||v</c> hex signature in
+    /// <see cref="RespondRequest.TronSignatureRsv"/>. Address is
+    /// base58check with version byte 0x41 (T-prefixed, 34 chars).
+    /// Operator approval surface in Home.razor displays the network
+    /// + derived address + message text.
+    /// </summary>
+    public const string TronSign = "tron_sign";
 }
 
 /// <summary>
@@ -287,4 +302,39 @@ public static class EdChain
     /// AccountID = HASH160(0xED || pubkey32). Preamble:
     /// <c>"XRP signed message:\n"</c>.</summary>
     public const string Ripple = "xrp";
+}
+
+/// <summary>
+/// Discriminator for the two shapes <see cref="PendingRequestKind.TronSign"/>
+/// can carry. Wave 9.
+/// </summary>
+public static class TronMessageKind
+{
+    /// <summary>TIP-191 prefixed message hash. Today's only wired modality.</summary>
+    public const string MessageSigning = "message_signing";
+
+    /// <summary>TRON protobuf-serialized Transaction signing. Reserved
+    /// for a follow-up wave when the protobuf parser ships.</summary>
+    public const string Transaction = "transaction";
+}
+
+/// <summary>
+/// TRON network discriminator carried on
+/// <see cref="PendingRequestContext.TronNetwork"/>. All three TRON
+/// networks share the same address-version byte (0x41) and the same
+/// signed-message preamble, so the network distinction lives at the
+/// RPC + explorer layer, not the signature layer. We surface it here
+/// so the operator UI can label which environment is being signed
+/// against ("mainnet" vs "shasta" vs "nile").
+/// </summary>
+public static class TronNetwork
+{
+    /// <summary>TRON mainnet.</summary>
+    public const string Mainnet = "mainnet";
+
+    /// <summary>Shasta testnet.</summary>
+    public const string Shasta = "shasta";
+
+    /// <summary>Nile testnet.</summary>
+    public const string Nile = "nile";
 }

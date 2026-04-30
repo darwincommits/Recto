@@ -73,6 +73,11 @@ public static class MauiProgram
         // support SLIP-0010 ed25519 derivation paths, so the software
         // BouncyCastle path IS the implementation, not a fallback).
         builder.Services.AddSingleton<IEd25519ChainSignService, MauiEd25519ChainSignService>();
+        // Wave 9: TRON signing service. Same one-mnemonic-shared-across-
+        // services posture as ETH/BTC/ED -- reads the same SecureStorage
+        // entry (recto.phone.eth.mnemonic.{alias}). Cross-platform
+        // singleton; secp256k1 + Keccak-256 reuse EthSigningOps directly.
+        builder.Services.AddSingleton<ITronSignService, MauiTronSignService>();
         // v0.4.1 user preferences (polling interval, history limit, theme).
         // MAUI Preferences-backed (not SecureStorage; not secret).
         builder.Services.AddSingleton<IUserPreferencesService, MauiUserPreferencesService>();

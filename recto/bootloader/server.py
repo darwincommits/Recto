@@ -355,6 +355,19 @@ class BootloaderHandler(BaseHTTPRequestHandler):
             # field as Bitcoin) don't break.
             if p.btc_coin is not None and p.btc_coin != "btc":
                 context["btc_coin"] = p.btc_coin
+        # ED25519-chain context (kind == "ed_sign", wave-8). Same
+        # emit-only-when-set pattern as ETH/BTC so non-ed wire shape
+        # is unchanged. Mirrors the C# `PendingRequestContext` ED
+        # additions in `Recto.Shared.Protocol.V04`.
+        if p.kind == "ed_sign":
+            context["ed_chain"] = p.ed_chain
+            context["ed_message_kind"] = p.ed_message_kind
+            context["ed_address"] = p.ed_address
+            context["ed_derivation_path"] = p.ed_derivation_path
+            if p.ed_message_text is not None:
+                context["ed_message_text"] = p.ed_message_text
+            if p.ed_payload_hex is not None:
+                context["ed_payload_hex"] = p.ed_payload_hex
         return {
             "request_id": p.request_id,
             "kind": p.kind,
@@ -512,9 +525,95 @@ class BootloaderHandler(BaseHTTPRequestHandler):
                 raise BootloaderError(
                     f"BIP-137 header byte must be in 27..42, got {header}"
                 )
+        # Same shape for ed_sign: structure-check only, opaque forward.
+        # Raw ed25519 signatures are exactly 64 bytes (R||S). The
+        # response also carries ed_pubkey_hex (32-byte ed25519 public
+        # key, 64 hex chars) because XRP addresses are HASH160s and
+        # can't recover their pubkey — for protocol uniformity all
+        # three ed25519 chains carry the pubkey explicitly. The
+        # bootloader does NOT verify the ed25519 signature itself —
+        # that's the consumer's responsibility (chain RPC node /
+        # off-chain attestation verifier / capability-scope enforcer).
+        ed_sig: str | None = None
+        ed_pub: str | None = None
+        if req.kind == "ed_sign":
+            ed_sig = body.get("ed_signature_base64")
+            if not isinstance(ed_sig, str) or not ed_sig:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      reason="ed_signature_base64 missing on ed_sign approval")
+                raise BootloaderError(
+                    "ed_sign approval missing ed_signature_base64"
+                )
+            try:
+                ed_decoded = base64.b64decode(ed_sig.strip(), validate=False)
+            except Exception as exc:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      reason="ed_signature_base64 not base64")
+                raise BootloaderError(
+                    f"ed_signature_base64 must be valid base64, got {exc}"
+                ) from exc
+            if len(ed_decoded) != 64:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      reason="ed_signature_base64 wrong decoded length")
+                raise BootloaderError(
+                    f"ed_signature_base64 must decode to 64 bytes, got {len(ed_decoded)}"
+                )
+            ed_pub = body.get("ed_pubkey_hex")
+            if not isinstance(ed_pub, str) or not ed_pub:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      reason="ed_pubkey_hex missing on ed_sign approval")
+                raise BootloaderError(
+                    "ed_sign approval missing ed_pubkey_hex"
+                )
+            ed_pub_clean = ed_pub.strip()
+            ed_pub_clean = ed_pub_clean[2:] if ed_pub_clean.startswith(("0x", "0X")) else ed_pub_clean
+            if len(ed_pub_clean) != 64:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      reason="ed_pubkey_hex wrong length")
+                raise BootloaderError(
+                    f"ed_pubkey_hex must be 64 hex chars (32-byte ed25519 pubkey) "
+                    f"after optional 0x prefix, got {len(ed_pub_clean)}"
+                )
+            try:
+                bytes.fromhex(ed_pub_clean)
+            except ValueError as exc:
+                self._notify_resolved(req, ok=False, signature_b64u=None,
+                                      eth_signature_rsv=None,
+                                      btc_signature_base64=None,
+                                      ed_signature_base64=None,
+                                      ed_pubkey_hex=None,
+                                      reason="ed_pubkey_hex not hex")
+                raise BootloaderError(
+                    f"ed_pubkey_hex must be hex, got {exc}"
+                ) from exc
+            # Normalize ed_pub to the un-prefixed form for downstream
+            # forwarding so consumers don't have to re-strip.
+            ed_pub = ed_pub_clean
         self._notify_resolved(req, ok=True, signature_b64u=sig,
                               eth_signature_rsv=eth_sig,
-                              btc_signature_base64=btc_sig, reason=None)
+                              btc_signature_base64=btc_sig,
+                              ed_signature_base64=ed_sig,
+                              ed_pubkey_hex=ed_pub, reason=None)
         self._send_json(HTTPStatus.OK, {"resolved": True})
 
     def _notify_resolved(
@@ -526,6 +625,8 @@ class BootloaderHandler(BaseHTTPRequestHandler):
         reason: str | None,
         eth_signature_rsv: str | None = None,
         btc_signature_base64: str | None = None,
+        ed_signature_base64: str | None = None,
+        ed_pubkey_hex: str | None = None,
     ) -> None:
         """Surface a request resolution to the waiting launcher.
 
@@ -536,21 +637,37 @@ class BootloaderHandler(BaseHTTPRequestHandler):
 
         ``eth_signature_rsv`` is populated only when ``req.kind ==
         "eth_sign"`` and the operator approved; ``btc_signature_base64``
-        only when ``req.kind == "btc_sign"`` and approved. The launcher
-        forwards both to the consumer (smart contract / off-chain
-        verifier / wallet performing on-chain verification) without
-        further validation. ``signature_b64u`` is the Ed25519
-        paired-phone identity proof and is populated for every approval
-        regardless of kind.
+        only when ``req.kind == "btc_sign"`` and approved;
+        ``ed_signature_base64`` + ``ed_pubkey_hex`` only when ``req.kind
+        == "ed_sign"`` and approved. The launcher forwards all of these
+        to the consumer (smart contract / off-chain verifier / wallet
+        performing on-chain verification) without further validation.
+        ``signature_b64u`` is the Ed25519 paired-phone identity proof
+        and is populated for every approval regardless of kind.
         """
         notify_fn = getattr(self.config, "notify_resolved_fn", None)
         if notify_fn is not None:
             # Be tolerant of older notify_fn signatures that don't
             # accept the new kwargs. Try the full signature first; if
-            # the callable doesn't accept btc_signature_base64, retry
-            # without it (eth-only signatures from the wave-2 batch);
-            # if it doesn't accept eth_signature_rsv either, retry with
-            # only the v0.4.0 base 4-arg shape.
+            # the callable doesn't accept ed_*, retry without them;
+            # if it doesn't accept btc_signature_base64, retry without
+            # it (eth-only signatures from the wave-2 batch); if it
+            # doesn't accept eth_signature_rsv either, retry with only
+            # the v0.4.0 base 4-arg shape.
+            try:
+                notify_fn(
+                    req=req,
+                    ok=ok,
+                    signature_b64u=signature_b64u,
+                    eth_signature_rsv=eth_signature_rsv,
+                    btc_signature_base64=btc_signature_base64,
+                    ed_signature_base64=ed_signature_base64,
+                    ed_pubkey_hex=ed_pubkey_hex,
+                    reason=reason,
+                )
+                return
+            except TypeError:
+                pass
             try:
                 notify_fn(
                     req=req,

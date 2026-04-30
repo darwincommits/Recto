@@ -543,7 +543,7 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Wave 8: TRON + XRP + SOL + XLM (next)
+## Active sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — part 1 SHIPPED 2026-04-29; part 2 (C# phone-side) ACTIVE NEXT
 
 Goal: maximize coin throughput per sprint window. Erik's target
 list is 21 coins; XMR / ZCASH / CC explicitly skipped (privacy-by-
@@ -553,8 +553,14 @@ chains that share infrastructure unlock multiple coins per wave.
 
 **Coverage state entering this sprint: 16 of 21 top coins** signing
 through Recto, validated end-to-end on iPhone 11 hardware
-(2026-04-29). Recently shipped — all detail in `Prior sprints
-(shipped)` below + dated CHANGELOG entries:
+(2026-04-29). Wave 8 part 1 (Python verifier + protocol DTOs)
+landed today, putting ed25519-trio coverage at the protocol layer;
+part 2 (phone-side C# signing) plus iPhone smoke tests close the
+loop and bring coverage to 19 of 21 (90.5% — past the 80% gate that
+was holding the cross-wave priorities below).
+
+Recently shipped — all detail in `Prior sprints (shipped)` below +
+dated CHANGELOG entries:
 - **Wave 6** — EVM expansion + EIP-712 typed-data + EIP-1559
   transaction (2026-04-29). Unlocked 8 EVM-family coins.
 - **Wave 7** — Bitcoin family extension (LTC + DOGE + BCH) via
@@ -566,16 +572,104 @@ through Recto, validated end-to-end on iPhone 11 hardware
   code paths ran on real hardware. All five coin families approved
   end-to-end. Architectural bet validated.
 
-**Wave 8 / 9 — TRON, XRP, SOL, XLM (ACTIVE NEXT).** Each is its own curve +
-signature scheme:
-- TRON: secp256k1 + Keccak-256 + base58 address (close cousin of
-  ETH; can share SignWithRecovery primitive).
-- XRP: ed25519 OR secp256k1 (XRP supports both; ed25519 reuses
-  our existing Ed25519 envelope code, secp256k1 reuses the ETH
-  primitive).
-- SOL: ed25519 + base58 address; reuses the IEnclaveKeyService
-  Ed25519 primitive directly.
-- XLM: ed25519 + base32 address; reuses Ed25519 primitive.
+### Wave 8 part 1 — Python verifier + protocol DTOs (2026-04-29)
+
+Sister implementation of Wave 6 (ETH) and Wave 7 (BTC family) for
+the ed25519 chain family. Reuses zero curve code from those waves
+(secp256k1 vs ed25519 are different curves) but mirrors their
+protocol shape exactly: one credential kind (`ed_sign`), one
+discriminator field (`ed_chain` ∈ `{sol, xlm, xrp}`), one config
+table per chain holding the per-chain BIP-44 path / address
+encoding / message preamble.
+
+**Architecture**: one BIP-39 mnemonic per phone (shared with the
+existing `MauiEthSignService` and `MauiBtcSignService`), three new
+SLIP-0010 ed25519 trees (all-hardened paths because SLIP-0010 ed25519
+doesn't support non-hardened derivation):
+- SOL: `m/44'/501'/N'/0'` → base58(pubkey32) addresses (no checksum,
+  Bitcoin alphabet — Phantom / Solflare convention)
+- XLM: `m/44'/148'/N'` → StrKey `G…` addresses (RFC-4648 base32
+  with version byte 0x30 + CRC16-XMODEM checksum, SEP-0005 / SEP-0023)
+- XRP-ed25519: `m/44'/144'/0'/0'/N'` (Xumm / XRPL ed25519 convention)
+  → classic `r…` addresses (Ripple-flavored base58 with version byte
+  0x00 + Base58Check checksum + 0xED ed25519 prefix on pubkey
+  pre-image — XRP discriminates ed25519 from secp256k1 by prefixing
+  the raw pubkey with 0xED before HASH160ing into the AccountID)
+
+One backup ceremony covers all five coin families now (ETH, BTC,
+LTC, DOGE, BCH, SOL, XLM, XRP). 24 words, eight chain trees.
+
+**Wave 8 part 1 deliverables (this commit)**:
+- `recto.solana` Python module — base58 encoding (Bitcoin alphabet,
+  no checksum), SOL address derivation, signed-message hashing with
+  Recto's chosen preamble (`b"Solana signed message:\n"`), ed25519
+  signature verification (delegates to `cryptography`).
+- `recto.stellar` Python module — RFC-4648 base32 StrKey encoding,
+  CRC16-XMODEM (pure-Python bit-by-bit reference impl, pinned
+  against the canonical "123456789" → 0x31C3 vector), XLM address
+  derivation, signed-message hashing.
+- `recto.ripple` Python module — Ripple-alphabet base58 (distinct
+  from Bitcoin's; alphabet pinned), XRP-flavored Base58Check, 0xED
+  ed25519 prefix handling, AccountID derivation via HASH160 (borrows
+  `recto.bitcoin.ripemd160`), classic-address encoding, signed-
+  message hashing. Verifier requires BOTH the signature AND the
+  pubkey because XRP addresses are one-way HASH160s.
+- `recto[ed25519]` extra in `pyproject.toml` (empty list — gates the
+  import path; `cryptography` only needed for signature verification
+  and is already pulled by `recto[v0_4]`).
+- `PendingRequest.new_ed(...)` constructor in `recto.bootloader.state`
+  with construction-time validation matching Wave 7's `new_btc`
+  pattern. Six new optional `ed_*` fields on the `PendingRequest`
+  dataclass.
+- `_pending_to_wire` emits `ed_*` fields when `kind == "ed_sign"`
+  (omitted otherwise — regression test pins this).
+- `_handle_respond` structure-checks `ed_signature_base64` (64-byte
+  decode) AND `ed_pubkey_hex` (64 hex chars after optional 0x prefix
+  strip — XRP needs the explicit pubkey because addresses lose pubkey
+  info; SOL and XLM technically don't but carry it for protocol
+  uniformity). `_notify_resolved` extends to forward both new fields
+  alongside the existing eth/btc fields, with the same TypeError
+  fallback chain so older test fixtures still match.
+- 65+ new tests across `tests/test_solana.py`, `tests/test_stellar.py`,
+  `tests/test_ripple.py`, `tests/test_bootloader_ed.py` — pin the
+  encoding primitives against external reference values where
+  possible (CRC16, alphabet character orderings, SOL System Program
+  pubkey → "11111111111111111111111111111111"), round-trip the rest
+  (encode-decode, sign-verify), and exercise the bootloader's
+  validation paths end-to-end against a live HTTP loopback.
+
+**Wave 8 part 2 (next session — C# phone-side)**:
+- `Slip10` class in `Recto.Shared/Services/` (BouncyCastle ed25519,
+  hardened-only HMAC-SHA512 derivation per SLIP-0010 spec).
+- `IEd25519ChainSignService` interface in `Recto.Shared/Services/`
+  (cross-platform contract: chain-aware EnsureMnemonic / GetAccount
+  / SignMessage with `ed_chain` discriminator).
+- `Ed25519ChainSigningOps` static class — per-chain dispatch over
+  the SAME mnemonic the eth/btc services use, address encoding
+  mirroring the Python modules.
+- `MauiEd25519ChainSignService` SecureStorage-backed orchestrator,
+  one BIP-39 mnemonic shared with the eth/btc services.
+- Home.razor render arm with three new badges (SOL purple, XLM
+  blue, XRP green) + ApproveEdChainSignAsync dispatcher producing
+  the dual signature (ed25519 chain sig via IEd25519ChainSignService
+  + Ed25519 envelope via IEnclaveKeyService).
+- Mock bootloader UI buttons for "Queue SOL message_sign", "Queue
+  XLM message_sign", "Queue XRP message_sign".
+- C# tests in `Recto.Shared.Tests/` mirroring the Python module
+  tests + the existing eth/btc test patterns.
+
+**Coverage projection on part 2 landing**: 19 of 21 target coins
+(90.5%). Past the 80% gate that was holding the cross-wave priorities
+below — once part 2 ships and iPhone smoke-tests pass, those move
+back into active-sprint candidacy.
+
+**Wave 9 — TRON (ACTIVE AFTER WAVE 8 part 2).** secp256k1 +
+Keccak-256 + base58 address; close cousin of ETH. Reuses
+`EthSigningOps.SignWithRecovery` directly; net-new is the address
+derivation (Keccak-256 of pubkey, last 20 bytes, base58check with
+TRON's version byte 0x41) and the BIP-44 path (`m/44'/195'/0'/0/N`
+— note this is the secp256k1 BIP-32 path, NOT SLIP-0010 since TRON
+uses secp256k1).
 
 **Wave 10 — Cardano (ADA).** ed25519 with custom derivation
 (BIP-44 + Cardano's own SLIP-23 / CIP-1852 hardened-key tweak).

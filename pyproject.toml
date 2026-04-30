@@ -74,6 +74,24 @@ bitcoin = []
    # MAUI Blazor under the SAME BIP-39 mnemonic the eth_sign service
    # uses — one mnemonic, two BIP-44 trees (m/44'/60' for ETH,
    # m/84'/0' for BTC native SegWit).
+ed25519 = []
+   # `pip install recto[ed25519]` enables the ed_sign credential kind
+   # (recto.solana / recto.stellar / recto.ripple modules: base58 + base32
+   # StrKey + Ripple-flavored base58 address encodings, CRC16-XMODEM,
+   # XRP HASH160 with 0xED ed25519 prefix, per-chain message hashing).
+   # Address encoding and message hashing are pure Python stdlib (the
+   # XRP module borrows recto.bitcoin.ripemd160 for HASH160, also
+   # pure-stdlib). Empty list is intentional — no new packages added.
+   # Signature verification (the optional verify_signature path on each
+   # chain module) requires `cryptography>=42` to be installed; this is
+   # pulled in transitively via `recto[v0_4]` when the bootloader is
+   # active. Stand-alone verifier callers should `pip install recto[v0_4]`
+   # to get cryptography. Sign-side primitives (BIP-39 → SLIP-0010
+   # ed25519 derivation, ed25519 sign with the chain-specific message
+   # hash) live phone-side in the MAUI Blazor project — same BIP-39
+   # mnemonic as eth_sign and btc_sign, three new SLIP-10 trees:
+   # m/44'/501'/N'/0' (SOL), m/44'/148'/N' (XLM), m/44'/144'/0'/0'/N'
+   # (XRP-ed25519, all hardened). One mnemonic, five chain-coin trees.
 
 [project.urls]
 Homepage = "https://github.com/darwincommits/Recto"

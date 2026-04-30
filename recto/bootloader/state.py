@@ -160,6 +160,20 @@ class PendingRequest:
       phone, and additionally surfaces ``eth_signature_rsv`` on the
       respond body for the consumer (smart contract / off-chain
       verifier) to validate.
+    - ``"btc_sign"`` — Bitcoin-family signing (BTC / LTC / DOGE / BCH).
+      Populates the seven ``btc_*`` fields including the ``btc_coin``
+      discriminator. Surfaces ``btc_signature_base64`` (a 65-byte
+      BIP-137 compact signature) on the respond body.
+    - ``"ed_sign"`` — Ed25519 chains signing (SOL / XLM / XRP). Wave-8
+      addition. Populates the six ``ed_*`` fields including the
+      ``ed_chain`` discriminator. Surfaces ``ed_signature_base64`` (a
+      raw 64-byte ed25519 signature) AND ``ed_pubkey_hex`` (the 32-byte
+      ed25519 public key, 64 hex chars) on the respond body. The
+      explicit pubkey is required because XRP addresses are one-way
+      HASH160s of the pubkey — verifiers can't recover pubkey from
+      address — so for protocol uniformity all three chains carry
+      the pubkey explicitly even though SOL and XLM addresses ARE
+      reversible.
     """
 
     request_id: str
@@ -207,6 +221,23 @@ class PendingRequest:
     # extension. Mirrors C# `BtcCoin` constants in
     # `Recto.Shared.Protocol.V04`.
     btc_coin: str | None = None  # "btc" | "ltc" | "doge" | "bch"
+
+    # ED25519-chain context (kind == "ed_sign"). All optional with
+    # default None. Six fields mirror the C# `PendingRequestContext`
+    # ED additions in `Recto.Shared.Protocol.V04`. See
+    # `docs/v0.4-protocol.md` "Ed25519 chains signing capability
+    # (v0.6+)". Same `ed_sign` credential kind covers SOL, XLM, and
+    # XRP-ed25519; the `ed_chain` discriminator selects which.
+    # Per-chain BIP-44 / SLIP-0010 paths and address encodings live
+    # in the chain-specific Python modules
+    # (`recto.solana` / `recto.stellar` / `recto.ripple`) and on the
+    # phone-side C# signing service.
+    ed_chain: str | None = None  # "sol" | "xlm" | "xrp"
+    ed_message_kind: str | None = None  # "message_signing" | "transaction"
+    ed_address: str | None = None  # chain-encoded operator-approved address
+    ed_derivation_path: str | None = None  # chain-default if absent (see new_ed)
+    ed_message_text: str | None = None  # for message_signing
+    ed_payload_hex: str | None = None  # for transaction (reserved)
 
     @classmethod
     def new(
@@ -418,6 +449,114 @@ class PendingRequest:
             btc_message_text=btc_message_text,
             btc_psbt_base64=btc_psbt_base64,
             btc_coin=btc_coin,
+        )
+
+    @classmethod
+    def new_ed(
+        cls,
+        *,
+        service: str,
+        secret: str,
+        phone_id: str,
+        operation_description: str,
+        payload_hash_b64u: str,
+        child_pid: int,
+        child_argv0: str,
+        ed_chain: str,
+        ed_message_kind: str,
+        ed_address: str,
+        ed_derivation_path: str | None = None,
+        ed_message_text: str | None = None,
+        ed_payload_hex: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> PendingRequest:
+        """Construct an ``ed_sign`` PendingRequest with the six
+        Ed25519-chain-specific context fields populated.
+
+        Validates that:
+        - ``ed_chain`` is one of ``"sol"`` / ``"xlm"`` / ``"xrp"``
+        - ``ed_message_kind`` is one of ``"message_signing"`` /
+          ``"transaction"``
+        - exactly one of (``ed_message_text``, ``ed_payload_hex``) is
+          populated to match the message kind
+        - ``ed_address`` is non-empty and at least 25 chars (loose
+          floor; the shortest valid address among the three chains
+          is ~25 chars for an XRP classic address)
+
+        Defaults ``ed_derivation_path`` to the chain-canonical SLIP-0010
+        path when absent (Phantom for SOL, SEP-0005 for XLM, Xumm-style
+        all-hardened for XRP-ed25519).
+
+        Raises ``ValueError`` on any failure; consumers (the launcher,
+        the mock bootloader operator-UI) are expected to validate at
+        construction time so a malformed request never lands on the
+        queue.
+        """
+        if ed_chain not in ("sol", "xlm", "xrp"):
+            raise ValueError(
+                f"ed_chain must be one of 'sol'|'xlm'|'xrp', got {ed_chain!r}"
+            )
+        if ed_message_kind not in ("message_signing", "transaction"):
+            raise ValueError(
+                f"ed_message_kind must be one of 'message_signing'|'transaction', "
+                f"got {ed_message_kind!r}"
+            )
+        # Coin-default SLIP-0010 paths (all hardened-only).
+        if ed_derivation_path is None:
+            ed_derivation_path = {
+                "sol": "m/44'/501'/0'/0'",      # Phantom / Solflare
+                "xlm": "m/44'/148'/0'",         # SEP-0005
+                "xrp": "m/44'/144'/0'/0'/0'",   # Xumm-style ed25519
+            }[ed_chain]
+        body_fields = {
+            "message_signing": ed_message_text,
+            "transaction": ed_payload_hex,
+        }
+        expected = body_fields[ed_message_kind]
+        if expected is None or expected == "":
+            field_name = {
+                "message_signing": "ed_message_text",
+                "transaction": "ed_payload_hex",
+            }[ed_message_kind]
+            raise ValueError(
+                f"ed_message_kind={ed_message_kind!r} requires {field_name} to be set"
+            )
+        if not ed_address or len(ed_address.strip()) < 25:
+            # Loose floor: the shortest legitimate XRP classic address
+            # is ~25 chars; SOL is 32-44 chars; XLM StrKey is exactly
+            # 56 chars. 25-char floor catches obvious truncation /
+            # paste errors. Full per-chain validation runs phone-side
+            # during the BIP-39 → SLIP-0010 → address-encode pipeline.
+            raise ValueError(
+                f"ed_address must be at least 25 chars, got {ed_address!r}"
+            )
+        if ed_message_kind == "transaction":
+            # Reserved kind; not yet wired through the chain-module
+            # transaction-hashing rules. Refuse here so a future phone
+            # implementation can enable it without protocol drift.
+            raise ValueError(
+                "ed_message_kind='transaction' is reserved for a follow-up "
+                "wave; only 'message_signing' is wired today"
+            )
+        now = int(time.time())
+        return cls(
+            request_id=str(uuid.uuid4()),
+            kind="ed_sign",
+            service=service,
+            secret=secret,
+            phone_id=phone_id,
+            operation_description=operation_description,
+            payload_hash_b64u=payload_hash_b64u,
+            child_pid=child_pid,
+            child_argv0=child_argv0,
+            requested_at_unix=now,
+            expires_at_unix=now + ttl_seconds,
+            ed_chain=ed_chain,
+            ed_message_kind=ed_message_kind,
+            ed_address=ed_address.strip(),
+            ed_derivation_path=ed_derivation_path,
+            ed_message_text=ed_message_text,
+            ed_payload_hex=ed_payload_hex,
         )
 
     @property

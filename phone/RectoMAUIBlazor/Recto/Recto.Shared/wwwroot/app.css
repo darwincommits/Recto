@@ -59,6 +59,11 @@
     --rec-coin-ltc:     #345d9d;
     --rec-coin-doge:    #c2a633;
     --rec-coin-bch:     #0ac18e;
+    /* Wave-8 ed25519 chains. SOL purple = Phantom brand, XLM blue =
+       Stellar's brand light blue, XRP green = Ripple's brand teal. */
+    --rec-coin-sol:     #9945ff;
+    --rec-coin-xlm:     #14b6e7;
+    --rec-coin-xrp:     #23292f;
 
     /* ---- Typography ---- */
     --rec-font-sans:    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;

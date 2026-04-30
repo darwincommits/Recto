@@ -1391,6 +1391,75 @@ class Handler(BaseHTTPRequestHandler):
             _queue_btc_family_message_sign("bch")
             return
 
+        # ---- Wave-8 ed25519-chain message_signing endpoints (SOL / XLM / XRP) ----
+        # Same shape across the three chains. The crypto primitive (raw
+        # 64-byte ed25519 signature over a 32-byte SHA-256 of
+        # chain_preamble || message_bytes) is identical; differences are
+        # the SLIP-0010 path, address encoding, and message preamble —
+        # all encoded in the helper below.
+        _ED_CHAIN_CONFIG = {
+            "sol":  {"ticker": "SOL", "path": "m/44'/501'/0'/0'",     "addr": "11111111111111111111111111111112",                              "secret": "sol-wallet-login"},
+            "xlm":  {"ticker": "XLM", "path": "m/44'/148'/0'",        "addr": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",     "secret": "xlm-wallet-login"},
+            "xrp":  {"ticker": "XRP", "path": "m/44'/144'/0'/0'/0'",  "addr": "rPlaceholder111111111111111111111",                            "secret": "xrp-wallet-login"},
+        }
+
+        def _queue_ed_chain_message_sign(chain: str) -> None:
+            """Mint a login-style message and queue an ed_sign request
+            for the given ed25519 chain. Phone derives ed25519 seed from
+            the shared mnemonic at the chain's default SLIP-0010 path,
+            computes the chain-specific signed-message hash (preamble
+            varies — Recto-convention: 'Solana signed message:\\n' /
+            'Stellar signed message:\\n' / 'XRP signed message:\\n'),
+            signs, returns 64-byte raw signature + 32-byte pubkey hex +
+            Ed25519 envelope. Mock-side respond handler (verifies the
+            chain signature using recto.solana / recto.stellar /
+            recto.ripple) is a follow-up.
+            """
+            cfg = _ED_CHAIN_CONFIG[chain]
+            with STATE._lock:
+                target_phone = STATE.registered[-1] if STATE.registered else None
+            if target_phone is None:
+                self._send_redirect("/")
+                return
+            request_id = str(uuid.uuid4())
+            payload_hash = secrets.token_bytes(32)
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            message_text = f"Login to demo.recto.example at {ts} ({cfg['ticker']})"
+            ctx = {
+                "child_pid": secrets.randbelow(60000) + 1000,
+                "child_argv0": "browser",
+                "requested_at_unix": int(time.time()),
+                "operation_description": f"{cfg['ticker']} message_signing: {message_text!r}",
+                "payload_hash_b64u": b64u_encode(payload_hash),
+                "ed_chain": chain,
+                "ed_message_kind": "message_signing",
+                "ed_address": cfg["addr"],
+                "ed_derivation_path": cfg["path"],
+                "ed_message_text": message_text,
+            }
+            with STATE._lock:
+                STATE.pending_requests[request_id] = {
+                    "request_id": request_id,
+                    "kind": "ed_sign",
+                    "service": "demo.recto.example",
+                    "secret": cfg["secret"],
+                    "context": ctx,
+                    "_phone_id": target_phone["phone_id"],
+                    "_queued_at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                }
+            send_push_wakeup(target_phone, request_id, "ed_sign")
+            self._send_redirect("/")
+
+        if url.path == "/_queue_sol_message_sign":
+            _queue_ed_chain_message_sign("sol")
+            return
+        if url.path == "/_queue_xlm_message_sign":
+            _queue_ed_chain_message_sign("xlm")
+            return
+        if url.path == "/_queue_xrp_message_sign":
+            _queue_ed_chain_message_sign("xrp")
+            return
+
         if url.path == "/_queue_eth_personal_sign":
             # v0.5+ ETH personal_sign request. Mints a fixed login-style
             # message, queues an eth_sign PendingRequest with the seven
@@ -2701,6 +2770,15 @@ def render_index() -> str:
 </form>
 <form method="post" action="/_queue_bch_message_sign">
   <button type="submit"{'' if STATE.registered else ' disabled'}>Queue BCH message_sign</button>
+</form>
+<form method="post" action="/_queue_sol_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue SOL message_sign</button>
+</form>
+<form method="post" action="/_queue_xlm_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue XLM message_sign</button>
+</form>
+<form method="post" action="/_queue_xrp_message_sign">
+  <button type="submit"{'' if STATE.registered else ' disabled'}>Queue XRP message_sign</button>
 </form>
 <div class="dim" style="font-size: 0.85rem; margin-top: 0.4rem;">
   Sign request targets the most-recently-registered phone with a random managed secret.

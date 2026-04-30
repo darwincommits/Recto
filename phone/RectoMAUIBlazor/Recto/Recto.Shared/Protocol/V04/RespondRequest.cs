@@ -27,6 +27,16 @@ namespace Recto.Shared.Protocol.V04;
 /// §"Header byte values". As with eth_sign, <see cref="SignatureB64u"/>
 /// is also populated with the phone's registration-key Ed25519
 /// envelope so the bootloader proves response provenance.</item>
+/// <item><c>ed_sign</c> approval populates
+/// <see cref="EdSignatureBase64"/> with the 64-byte raw ed25519
+/// chain signature base64-encoded AND <see cref="EdPubkeyHex"/> with
+/// the 32-byte ed25519 public key as 64 hex chars (with optional 0x
+/// prefix). The pubkey is required because XRP addresses are
+/// HASH160s of the pubkey — verifiers can't recover pubkey from an
+/// XRP classic address; SOL and XLM addresses ARE invertible but
+/// carry the pubkey explicitly for protocol uniformity. As with
+/// eth_sign / btc_sign, <see cref="SignatureB64u"/> is also populated
+/// with the phone's registration-key Ed25519 envelope.</item>
 /// </list>
 /// Denial of any kind populates <see cref="Reason"/> instead.
 /// </summary>
@@ -40,7 +50,9 @@ public sealed record RespondRequest(
     [property: JsonPropertyName("webauthn_client_data_b64u")] string? WebAuthnClientDataB64u = null,
     [property: JsonPropertyName("webauthn_authenticator_data_b64u")] string? WebAuthnAuthenticatorDataB64u = null,
     [property: JsonPropertyName("eth_signature_rsv")] string? EthSignatureRsv = null,
-    [property: JsonPropertyName("btc_signature_base64")] string? BtcSignatureBase64 = null);
+    [property: JsonPropertyName("btc_signature_base64")] string? BtcSignatureBase64 = null,
+    [property: JsonPropertyName("ed_signature_base64")] string? EdSignatureBase64 = null,
+    [property: JsonPropertyName("ed_pubkey_hex")] string? EdPubkeyHex = null);
 
 public static class RespondDecision
 {

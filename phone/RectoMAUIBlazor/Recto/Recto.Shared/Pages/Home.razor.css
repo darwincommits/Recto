@@ -172,3 +172,6 @@
 .rec-coin-badge-ltc  { background: var(--rec-coin-ltc); color: #ffffff; }
 .rec-coin-badge-doge { background: var(--rec-coin-doge); color: #1a1308; }
 .rec-coin-badge-bch  { background: var(--rec-coin-bch); color: #07140e; }
+.rec-coin-badge-sol  { background: var(--rec-coin-sol); color: #ffffff; }
+.rec-coin-badge-xlm  { background: var(--rec-coin-xlm); color: #06222d; }
+.rec-coin-badge-xrp  { background: var(--rec-coin-xrp); color: #ffffff; }

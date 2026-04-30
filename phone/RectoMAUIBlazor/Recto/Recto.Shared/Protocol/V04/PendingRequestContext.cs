@@ -135,7 +135,30 @@ public sealed record PendingRequestContext(
     // selects which. Absent / null defaults to "btc" for backward
     // compat with v0.5 launchers that pre-date the multi-coin
     // extension. See BtcCoin enum class for valid values.
-    [property: JsonPropertyName("btc_coin")] string? BtcCoin = null);
+    [property: JsonPropertyName("btc_coin")] string? BtcCoin = null,
+    // Wave-8: Ed25519-chain context (SOL / XLM / XRP). Same `ed_sign`
+    // credential kind covers all three; the ed_chain discriminator
+    // selects which. ed_message_kind is `message_signing` (the only
+    // wired modality today) or `transaction` (reserved). ed_address
+    // is the chain-encoded address the operator pre-approved; the
+    // phone displays it on the approval card so the human can
+    // visually confirm the signing key matches. ed_derivation_path
+    // defaults to the chain-canonical SLIP-0010 path when absent.
+    // Exactly one of (ed_message_text, ed_payload_hex) must be
+    // populated to match ed_message_kind. SAME mnemonic as eth_sign
+    // and btc_sign — different SLIP-0010 path tree per chain. Sign
+    // side derives via SLIP-0010 ed25519 (NOT BIP-32 secp256k1),
+    // hashes the message with the chain-specific preamble, and
+    // returns a raw 64-byte ed25519 signature plus the 32-byte
+    // public key (XRP needs the explicit pubkey because addresses
+    // are HASH160s and don't carry it; SOL and XLM carry it for
+    // protocol uniformity).
+    [property: JsonPropertyName("ed_chain")] string? EdChain = null,
+    [property: JsonPropertyName("ed_message_kind")] string? EdMessageKind = null,
+    [property: JsonPropertyName("ed_address")] string? EdAddress = null,
+    [property: JsonPropertyName("ed_derivation_path")] string? EdDerivationPath = null,
+    [property: JsonPropertyName("ed_message_text")] string? EdMessageText = null,
+    [property: JsonPropertyName("ed_payload_hex")] string? EdPayloadHex = null);
 
 public static class PgpOperation
 {

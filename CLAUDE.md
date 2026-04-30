@@ -543,7 +543,7 @@ read that file in addition to this one.
   root of trust + one mnemonic deriving five coin trees) is now
   validated end-to-end.
 
-## Active sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — part 1 SHIPPED 2026-04-29; part 2 (C# phone-side) ACTIVE NEXT
+## Active sprint — Wave 8: ed25519 trio (SOL + XLM + XRP) — parts 1 + 2 SHIPPED 2026-04-29; iPhone smoke + cross-wallet interop next
 
 Goal: maximize coin throughput per sprint window. Erik's target
 list is 21 coins; XMR / ZCASH / CC explicitly skipped (privacy-by-
@@ -638,30 +638,83 @@ LTC, DOGE, BCH, SOL, XLM, XRP). 24 words, eight chain trees.
   (encode-decode, sign-verify), and exercise the bootloader's
   validation paths end-to-end against a live HTTP loopback.
 
-**Wave 8 part 2 (next session — C# phone-side)**:
-- `Slip10` class in `Recto.Shared/Services/` (BouncyCastle ed25519,
-  hardened-only HMAC-SHA512 derivation per SLIP-0010 spec).
-- `IEd25519ChainSignService` interface in `Recto.Shared/Services/`
-  (cross-platform contract: chain-aware EnsureMnemonic / GetAccount
-  / SignMessage with `ed_chain` discriminator).
-- `Ed25519ChainSigningOps` static class — per-chain dispatch over
-  the SAME mnemonic the eth/btc services use, address encoding
-  mirroring the Python modules.
-- `MauiEd25519ChainSignService` SecureStorage-backed orchestrator,
-  one BIP-39 mnemonic shared with the eth/btc services.
-- Home.razor render arm with three new badges (SOL purple, XLM
-  blue, XRP green) + ApproveEdChainSignAsync dispatcher producing
-  the dual signature (ed25519 chain sig via IEd25519ChainSignService
-  + Ed25519 envelope via IEnclaveKeyService).
-- Mock bootloader UI buttons for "Queue SOL message_sign", "Queue
-  XLM message_sign", "Queue XRP message_sign".
-- C# tests in `Recto.Shared.Tests/` mirroring the Python module
-  tests + the existing eth/btc test patterns.
+### Wave 8 part 2 — C# phone-side (2026-04-29)
 
-**Coverage projection on part 2 landing**: 19 of 21 target coins
-(90.5%). Past the 80% gate that was holding the cross-wave priorities
-below — once part 2 ships and iPhone smoke-tests pass, those move
-back into active-sprint candidacy.
+C# half of Wave 8, sister implementation to Wave 6 (ETH C#) and
+Wave 7 (BTC C#) but for the ed25519 chain family. Same one-mnemonic-
+shared-across-services posture: ETH + BTC + ED services all read
+the same `recto.phone.eth.mnemonic.{alias}` SecureStorage entry,
+each derives at its own curve / path tree.
+
+**Deliverables (this commit)**:
+- `Recto.Shared/Services/Slip10.cs` — SLIP-0010 ed25519 derivation
+  (HMAC-SHA512 with key `"ed25519 seed"`, BouncyCastle ed25519
+  scalar mult for pubkey-from-private). Hardened-only — non-hardened
+  paths throw at `ParsePath` time. Sister of `Bip32` for ed25519.
+- `Recto.Shared/Services/Ed25519ChainSigningOps.cs` — single static
+  class covering all three chains via a per-chain `ChainConfig`
+  table. Mirrors Wave 7's `BtcSigningOps` shape: `SignedMessageHash`
+  / `AddressFromPublicKey` / `SignMessage` all chain-aware. Address
+  encoders for SOL (Bitcoin-alphabet base58 no checksum), XLM
+  (RFC-4648 base32 StrKey + CRC16-XMODEM), XRP (Ripple-alphabet
+  Base58Check + 0xED ed25519 prefix on pubkey pre-image + RIPEMD-160
+  via BouncyCastle). All curve-free except the actual ed25519 sign
+  primitive.
+- `Recto.Shared/Services/IEd25519ChainSignService.cs` — interface +
+  `EdSignResult(SignatureBase64, PublicKeyHex)` value-returning
+  contract. Public key hex is required because XRP addresses are
+  HASH160s and don't carry the pubkey; SOL/XLM carry it for
+  protocol uniformity.
+- `Recto.Shared/Models/EdAccount.cs` — value object mirroring
+  `EthAccount` / `BtcAccount`.
+- `Recto/Services/MauiEd25519ChainSignService.cs` — SecureStorage-
+  backed implementation. SAME `MnemonicPrefix = "recto.phone.eth.mnemonic."`
+  as the ETH/BTC services. ZeroMemory-wipes seed + leaf private
+  key + chain code in `finally` blocks per the existing pattern.
+  Single cross-platform DI registration in `MauiProgram.cs` (no
+  per-platform fan-out — neither iOS Secure Enclave nor Android
+  StrongBox natively support SLIP-0010 ed25519 derivation, so the
+  software BouncyCastle path IS the implementation).
+- `Recto.Shared/Protocol/V04/PendingRequest.cs` — `PendingRequestKind.EdSign`
+  constant + `EdChain` enum class (Solana / Stellar / Ripple) +
+  `EdMessageKind` enum class (MessageSigning / Transaction).
+- `Recto.Shared/Protocol/V04/PendingRequestContext.cs` — six new
+  optional ed_* fields mirroring Python's state.py shape.
+- `Recto.Shared/Protocol/V04/RespondRequest.cs` — `EdSignatureBase64`
+  + `EdPubkeyHex` fields on the union response shape.
+- `Recto.Shared/Pages/Home.razor` — render arm for `ed_sign` (chain-
+  specific badge + chain name + path + derived address + message
+  text), `ApproveEdSignAsync` dispatcher producing the dual signature
+  (chain ed25519 sig + Ed25519 envelope). Pre-derive cache
+  `_edAddressByRequestId` populated in `RefreshPendingAsync`.
+  `IsTokenSigningKind` updated so ed_sign lands in the Crypto
+  Tokens section. Per-chain helpers: `_edChainBadgeClass` / 
+  `_edChainTickerLabel` / `_edChainDisplayName` / 
+  `_edDefaultPathForChain` / `_edMessageKindLabel`.
+- `Recto.Shared/wwwroot/app.css` + `Pages/Home.razor.css` — new
+  per-coin badge color variables (SOL Phantom-purple `#9945ff`,
+  XLM Stellar-blue `#14b6e7`, XRP `#23292f`) and the matching
+  `.rec-coin-badge-{sol,xlm,xrp}` classes.
+- `phone/RectoMAUIBlazor/dev-tools/mock-bootloader.py` — three new
+  operator-UI buttons + endpoint handlers (`/_queue_sol_message_sign`
+  / `/_queue_xlm_message_sign` / `/_queue_xrp_message_sign`) that
+  mint a login-style message and queue an `ed_sign` PendingRequest.
+- `Recto.Shared.Tests/Slip10Tests.cs` — derivation determinism +
+  hardened-only enforcement + cross-curve distinctness from BIP-32
+  (the SLIP-0010 / BIP-32 master keys MUST differ for the same seed
+  because the HMAC keys differ).
+- `Recto.Shared.Tests/Ed25519ChainSigningOpsTests.cs` — CRC16
+  canonical pin, Ripple alphabet pin, SOL System Program (32 zero
+  bytes pubkey → 32 ones address), per-chain message preamble pins,
+  cross-chain hash distinctness (same message + different chain →
+  different hash), end-to-end sign-then-verify round-trip with a
+  BouncyCastle Ed25519Signer.
+
+**Coverage now**: 19 of 21 target coins (90.5%). Past the 80% gate
+that was holding the cross-wave priorities below. Cross-wallet
+interop pinning + iPhone smoke tests follow once Erik can verify
+mnemonic-derived addresses against Phantom (SOL), Stellar Lab
+(XLM), and Xumm (XRP).
 
 **Wave 9 — TRON (ACTIVE AFTER WAVE 8 part 2).** secp256k1 +
 Keccak-256 + base58 address; close cousin of ETH. Reuses

@@ -62,6 +62,17 @@ public static class MauiProgram
         // SegWit). BIP-137 message_signing verb is wired today; PSBT
         // (BIP-174 transaction signing) is reserved for a follow-up.
         builder.Services.AddSingleton<IBtcSignService, MauiBtcSignService>();
+        // Wave-8 ed25519-chain signing capability (SOL / XLM / XRP).
+        // Reads the SAME BIP-39 mnemonic the ETH and BTC services read
+        // (one mnemonic per phone, three new SLIP-0010 ed25519 trees:
+        // m/44'/501'/N'/0' for SOL, m/44'/148'/N' for XLM,
+        // m/44'/144'/0'/0'/N' for XRP-ed25519). Single cross-platform
+        // singleton — BouncyCastle ed25519 + Slip10 derivation are the
+        // canonical signing primitives on all targets (no per-platform
+        // fan-out; iOS Secure Enclave + Android StrongBox don't natively
+        // support SLIP-0010 ed25519 derivation paths, so the software
+        // BouncyCastle path IS the implementation, not a fallback).
+        builder.Services.AddSingleton<IEd25519ChainSignService, MauiEd25519ChainSignService>();
         // v0.4.1 user preferences (polling interval, history limit, theme).
         // MAUI Preferences-backed (not SecureStorage; not secret).
         builder.Services.AddSingleton<IUserPreferencesService, MauiUserPreferencesService>();

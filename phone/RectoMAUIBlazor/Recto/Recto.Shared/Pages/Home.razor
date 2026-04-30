@@ -14,6 +14,7 @@
 @inject ITotpService Totp
 @inject IEthSignService EthSigner
 @inject IBtcSignService BtcSigner
+@inject IEd25519ChainSignService EdSigner
 @inject IPinningService Pinning
 @inject IPairingStateService Pairing
 @inject IPushTokenService PushTokens
@@ -289,6 +290,37 @@
                                             {
                                                 <p class="mb-2 text-muted small" style="white-space: pre-wrap; word-break: break-word;">
                                                     <strong>PSBT:</strong> <code>@TruncateHash(req.Context.BtcPsbtBase64)</code>
+                                                </p>
+                                            }
+                                            else
+                                            {
+                                                <p class="mb-2 text-muted small">@req.Context.OperationDescription</p>
+                                            }
+                                            break;
+                                        case PendingRequestKind.EdSign:
+                                            // Wave-8 ed25519 chains (SOL / XLM / XRP). Same shape
+                                            // as the BTC arm: chain-specific badge + chain name +
+                                            // path + derived address + message text.
+                                            var edChain = req.Context.EdChain ?? EdChain.Solana;
+                                            <p class="mb-1 fw-semibold">
+                                                <span class="rec-coin-badge @(_edChainBadgeClass(edChain))">@(_edChainTickerLabel(edChain))</span>@(_edMessageKindLabel(req.Context.EdMessageKind))
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Chain: <code>@(_edChainDisplayName(edChain))</code>
+                                            </p>
+                                            <p class="mb-1 text-muted small">
+                                                Path: <code>@(req.Context.EdDerivationPath ?? _edDefaultPathForChain(edChain))</code>
+                                            </p>
+                                            @if (_edAddressByRequestId.TryGetValue(req.RequestId, out var edDerivedAddr))
+                                            {
+                                                <p class="mb-1 text-muted small" style="word-break: break-all;">
+                                                    Address: <code>@edDerivedAddr</code>
+                                                </p>
+                                            }
+                                            @if (req.Context.EdMessageKind == EdMessageKind.MessageSigning && !string.IsNullOrEmpty(req.Context.EdMessageText))
+                                            {
+                                                <p class="mb-2 text-muted small" style="white-space: pre-wrap; word-break: break-word;">
+                                                    <strong>Message:</strong> @req.Context.EdMessageText
                                                 </p>
                                             }
                                             else
@@ -612,6 +644,11 @@
     // the same as EthKeyAlias on purpose. Future v0.6+ vault refactor
     // will collapse both into a single VaultAlias.
     private const string BtcKeyAlias = "default";
+    // Wave-8: ED service also shares the same SecureStorage entry. One
+    // mnemonic per phone covers ETH + BTC + ED (eight chain coin
+    // families now: ETH/BTC/LTC/DOGE/BCH/SOL/XLM/XRP). Same alias
+    // again — three services point at the same row in storage.
+    private const string EdKeyAlias = "default";
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3);
 
     // Dev default points at the mock bootloader (phone/dev-tools/mock-bootloader.py).
@@ -635,6 +672,10 @@
     // (or Base58Check legacy / nested-SegWit when those purpose levels
     // are eventually wired) for pending btc_sign requests.
     private Dictionary<string, string> _btcAddressByRequestId = new();
+    // Wave-8: same pattern for ED chains. Pre-derived chain-encoded
+    // addresses (SOL base58 / XLM StrKey / XRP classic) for pending
+    // ed_sign requests, keyed by request_id.
+    private Dictionary<string, string> _edAddressByRequestId = new();
     private string? _processingRequestId;
     private string _processingText = string.Empty;
     private string? _pollingError;
@@ -870,6 +911,9 @@
                 case PendingRequestKind.BtcSign:
                     await ApproveBtcSignAsync(req);
                     break;
+                case PendingRequestKind.EdSign:
+                    await ApproveEdSignAsync(req);
+                    break;
                 default:
                     _pollingError = $"Cannot approve unknown request kind '{req.Kind}'.";
                     break;
@@ -974,6 +1018,107 @@
             Decision: RespondDecision.Approved,
             SignatureB64u: Base64UrlEncode(enclaveSignResult.Value),
             BtcSignatureBase64: compactSigBase64);
+        var respondResult = await BootloaderClient.RespondAsync(
+            _paired.BootloaderUrl, req.RequestId, respondReq, CancellationToken.None);
+        if (respondResult.IsFailure)
+        {
+            _pollingError = respondResult.Error.Message;
+            return;
+        }
+        await RefreshPendingAsync(CancellationToken.None);
+    }
+
+    private async Task ApproveEdSignAsync(PendingRequest req)
+    {
+        // Wave-8 ed25519 chains (SOL / XLM / XRP). Validate context.
+        // Today only message_signing is wired end-to-end on the phone
+        // side; transaction signing earns its own approval method when
+        // each chain's canonical transaction-blob hashing rule lands.
+        var msgKind = req.Context.EdMessageKind;
+        if (string.IsNullOrEmpty(msgKind))
+        {
+            _pollingError = "ed_sign request missing ed_message_kind.";
+            return;
+        }
+        if (msgKind != EdMessageKind.MessageSigning)
+        {
+            _pollingError = $"ed_sign kind '{msgKind}' is not yet implemented; only message_signing is wired today.";
+            return;
+        }
+        if (string.IsNullOrEmpty(req.Context.EdMessageText))
+        {
+            _pollingError = "ed_sign message_signing request missing ed_message_text.";
+            return;
+        }
+        if (string.IsNullOrEmpty(req.Context.PayloadHashB64u))
+        {
+            _pollingError = "ed_sign request missing payload_hash_b64u (Ed25519 envelope binding).";
+            return;
+        }
+
+        // Default chain to "sol" only because absence of ed_chain on the
+        // wire means the launcher built a malformed request — bail loud.
+        if (string.IsNullOrEmpty(req.Context.EdChain))
+        {
+            _pollingError = "ed_sign request missing ed_chain (sol/xlm/xrp).";
+            return;
+        }
+        var chain = req.Context.EdChain!;
+        var derivationPath = string.IsNullOrEmpty(req.Context.EdDerivationPath)
+            ? _edDefaultPathForChain(chain)
+            : req.Context.EdDerivationPath!;
+
+        _processingText = $"Signing with {_edChainDisplayName(chain)} key...";
+        StateHasChanged();
+        await Task.Yield();
+
+        // Phone produces TWO signatures (same shape as eth_sign /
+        // btc_sign):
+        //   (a) raw 64-byte ed25519 chain signature over
+        //       SHA-256(chain_preamble || message_bytes). Returned in
+        //       RespondRequest.EdSignatureBase64. The chain-specific
+        //       32-byte ed25519 public key (NOT the address) is also
+        //       returned in RespondRequest.EdPubkeyHex — XRP needs it
+        //       because addresses are HASH160s; SOL and XLM carry it
+        //       for protocol uniformity. Both opaque to the bootloader.
+        //   (b) Ed25519 over the bootloader-supplied payload_hash_b64u,
+        //       returned in RespondRequest.SignatureB64u. Proves the
+        //       response came from the paired phone — same envelope
+        //       eth_sign / btc_sign / single_sign use.
+        var signResult = await EdSigner.SignMessageAsync(
+            EdKeyAlias, chain, derivationPath, req.Context.EdMessageText!, CancellationToken.None);
+        if (signResult.IsFailure)
+        {
+            _pollingError = signResult.Error.Message;
+            return;
+        }
+        var edSignature = signResult.Value.SignatureBase64;
+        var edPubkeyHex = signResult.Value.PublicKeyHex;
+
+        byte[] payloadHash;
+        try { payloadHash = Base64UrlDecode(req.Context.PayloadHashB64u!); }
+        catch (Exception ex)
+        {
+            _pollingError = $"Could not decode payload hash: {ex.Message}";
+            return;
+        }
+        _processingText = "Awaiting biometric...";
+        StateHasChanged();
+        var enclaveSignResult = await EnclaveKeys.SignAsync(KeyAlias, payloadHash, CancellationToken.None);
+        if (enclaveSignResult.IsFailure)
+        {
+            _pollingError = enclaveSignResult.Error.Message;
+            return;
+        }
+
+        _processingText = "Sending response...";
+        StateHasChanged();
+        var respondReq = new RespondRequest(
+            PhoneId: _paired!.PhoneId,
+            Decision: RespondDecision.Approved,
+            SignatureB64u: Base64UrlEncode(enclaveSignResult.Value),
+            EdSignatureBase64: edSignature,
+            EdPubkeyHex: edPubkeyHex);
         var respondResult = await BootloaderClient.RespondAsync(
             _paired.BootloaderUrl, req.RequestId, respondReq, CancellationToken.None);
         if (respondResult.IsFailure)
@@ -1510,6 +1655,7 @@
             _pollingError = null;
             await PopulateEthAddressesAsync(_pending, ct);
             await PopulateBtcAddressesAsync(_pending, ct);
+            await PopulateEdAddressesAsync(_pending, ct);
         }
         else
         {
@@ -1572,6 +1718,34 @@
             }
         }
         _btcAddressByRequestId = newMap;
+    }
+
+    /// <summary>
+    /// Wave-8 sibling of PopulateEthAddressesAsync /
+    /// PopulateBtcAddressesAsync. Runs once per refresh; for each
+    /// pending ed_sign request, derives the chain-encoded address
+    /// (SOL base58 / XLM StrKey / XRP classic) so the render arm can
+    /// display "Address: ..." inline without doing async work in
+    /// markup.
+    /// </summary>
+    private async Task PopulateEdAddressesAsync(List<PendingRequest> pending, CancellationToken ct)
+    {
+        var newMap = new Dictionary<string, string>();
+        foreach (var req in pending)
+        {
+            if (req.Kind != PendingRequestKind.EdSign) continue;
+            if (string.IsNullOrEmpty(req.Context.EdChain)) continue;
+            var chain = req.Context.EdChain!;
+            var path = string.IsNullOrEmpty(req.Context.EdDerivationPath)
+                ? _edDefaultPathForChain(chain)
+                : req.Context.EdDerivationPath!;
+            var account = await EdSigner.EnsureMnemonicAsync(EdKeyAlias, chain, path, ct);
+            if (account.IsSuccess)
+            {
+                newMap[req.RequestId] = account.Value.Address;
+            }
+        }
+        _edAddressByRequestId = newMap;
     }
 
     private async Task HandleRetryPollAsync()
@@ -1703,6 +1877,7 @@
     {
         PendingRequestKind.EthSign => true,
         PendingRequestKind.BtcSign => true,
+        PendingRequestKind.EdSign => true,
         _ => false,
     };
 
@@ -1806,6 +1981,59 @@
         BtcCoin.Dogecoin    => "m/44'/3'/0'/0/0",
         BtcCoin.BitcoinCash => "m/44'/145'/0'/0/0",
         _ => "m/84'/0'/0'/0/0",
+    };
+
+    // ---------------------------------------------------------------
+    // Wave-8 ed25519-chain helpers (SOL / XLM / XRP). Mirror the
+    // BTC family helpers above; chain-specific badge color, display
+    // name, ticker label, default SLIP-0010 path.
+    // ---------------------------------------------------------------
+
+    private static string _edMessageKindLabel(string? kind) => kind switch
+    {
+        EdMessageKind.MessageSigning => "Sign message",
+        EdMessageKind.Transaction => "Sign transaction",
+        _ => "ED sign",
+    };
+
+    private static string _edChainTickerLabel(string chain) => chain switch
+    {
+        EdChain.Solana  => "SOL",
+        EdChain.Stellar => "XLM",
+        EdChain.Ripple  => "XRP",
+        _ => chain.ToUpperInvariant(),
+    };
+
+    /// <summary>CSS class for the chain-specific badge color. Add the
+    /// rec-coin-badge-{sol,xlm,xrp} classes in app.css next to the
+    /// btc/ltc/doge/bch badges; suggested colors are SOL purple, XLM
+    /// blue, XRP green to read distinctly from the BTC-family palette.</summary>
+    private static string _edChainBadgeClass(string chain) => chain switch
+    {
+        EdChain.Solana  => "rec-coin-badge-sol",
+        EdChain.Stellar => "rec-coin-badge-xlm",
+        EdChain.Ripple  => "rec-coin-badge-xrp",
+        _ => "rec-coin-badge-sol",
+    };
+
+    private static string _edChainDisplayName(string chain) => chain switch
+    {
+        EdChain.Solana  => "Solana",
+        EdChain.Stellar => "Stellar",
+        EdChain.Ripple  => "XRP",
+        _ => chain,
+    };
+
+    /// <summary>Default SLIP-0010 derivation path per chain. All
+    /// hardened-only because SLIP-0010 ed25519 doesn't support non-
+    /// hardened steps. SOL = Phantom convention, XLM = SEP-0005,
+    /// XRP-ed25519 = Xumm / XRPL ed25519 convention.</summary>
+    private static string _edDefaultPathForChain(string chain) => chain switch
+    {
+        EdChain.Solana  => "m/44'/501'/0'/0'",
+        EdChain.Stellar => "m/44'/148'/0'",
+        EdChain.Ripple  => "m/44'/144'/0'/0'/0'",
+        _ => "m/44'/501'/0'/0'",
     };
 
     // ---------------------------------------------------------------

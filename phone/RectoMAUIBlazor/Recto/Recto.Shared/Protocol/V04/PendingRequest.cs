@@ -113,6 +113,38 @@ public static class PendingRequestKind
     /// (target output, value cap, fee cap, expiry).
     /// </summary>
     public const string BtcSign = "btc_sign";
+
+    /// <summary>
+    /// v0.6+: phone signs an ed25519-chain payload (Solana, Stellar, or
+    /// XRP-ed25519) with a phone-resident ed25519 private key derived
+    /// from the SAME BIP-39 mnemonic the eth_sign / btc_sign credentials
+    /// use, via SLIP-0010 (NOT BIP-32 — secp256k1 vs ed25519 are
+    /// different curves). Three chain trees, all hardened-only paths
+    /// because SLIP-0010 ed25519 doesn't support non-hardened derivation:
+    /// <list type="bullet">
+    /// <item>SOL: <c>m/44'/501'/N'/0'</c> → <c>base58(pubkey32)</c>
+    /// addresses (no checksum, Bitcoin alphabet — Phantom / Solflare
+    /// convention).</item>
+    /// <item>XLM: <c>m/44'/148'/N'</c> → StrKey <c>G…</c> addresses
+    /// (RFC-4648 base32 with version byte 0x30 + CRC16-XMODEM checksum,
+    /// SEP-0023 / SEP-0005).</item>
+    /// <item>XRP-ed25519: <c>m/44'/144'/0'/0'/N'</c> → classic
+    /// <c>r…</c> addresses (Ripple-flavored Base58Check + 0xED ed25519
+    /// prefix on pubkey pre-image).</item>
+    /// </list>
+    /// Chain selected via <see cref="PendingRequestContext.EdChain"/>;
+    /// message-kind selected via
+    /// <see cref="PendingRequestContext.EdMessageKind"/> (currently
+    /// only <c>message_signing</c>; <c>transaction</c> is reserved
+    /// for a follow-up wave). Approval response carries both the
+    /// 64-byte raw ed25519 signature in
+    /// <see cref="RespondRequest.EdSignatureBase64"/> AND the 32-byte
+    /// ed25519 public key in <see cref="RespondRequest.EdPubkeyHex"/>
+    /// because XRP addresses are HASH160s and can't recover the pubkey
+    /// (SOL and XLM addresses ARE invertible but carry the pubkey
+    /// explicitly for protocol uniformity across the three chains).
+    /// </summary>
+    public const string EdSign = "ed_sign";
 }
 
 /// <summary>
@@ -207,4 +239,52 @@ public static class BtcCoin
     /// BCH wallet). Preamble:
     /// <c>"Bitcoin Signed Message:\n"</c>.</summary>
     public const string BitcoinCash = "bch";
+}
+
+/// <summary>
+/// Discriminator for the two shapes <see cref="PendingRequestKind.EdSign"/>
+/// can carry.
+/// </summary>
+public static class EdMessageKind
+{
+    /// <summary>Recto-convention chain-specific signed-message: SHA-256
+    /// of <c>chain-preamble || message_bytes</c>. Today's only wired
+    /// modality.</summary>
+    public const string MessageSigning = "message_signing";
+
+    /// <summary>Chain-specific transaction-blob hashing (Solana tx hash,
+    /// Stellar envelope hash with network passphrase, XRP sha512-half
+    /// with TX_PREFIX). Reserved for a follow-up wave.</summary>
+    public const string Transaction = "transaction";
+}
+
+/// <summary>
+/// Ed25519-chain discriminator carried on
+/// <see cref="PendingRequestContext.EdChain"/>. The crypto primitive
+/// (raw 64-byte ed25519 signature over a 32-byte chain-specific
+/// message hash) is identical across the family; per-chain
+/// differences are the SLIP-0010 derivation path, the address
+/// encoding, and the message preamble. All three chains share the
+/// <c>ed_sign</c> credential kind, distinguished by this value.
+/// </summary>
+public static class EdChain
+{
+    /// <summary>Solana (SOL) — <c>m/44'/501'/N'/0'</c> SLIP-0010
+    /// hardened path; <c>base58(pubkey32)</c> addresses (no checksum,
+    /// Bitcoin alphabet — Phantom / Solflare convention). Preamble:
+    /// <c>"Solana signed message:\n"</c>.</summary>
+    public const string Solana = "sol";
+
+    /// <summary>Stellar (XLM) — <c>m/44'/148'/N'</c> SLIP-0010 hardened
+    /// path (SEP-0005); StrKey <c>G…</c> base32 addresses with version
+    /// byte 0x30 + CRC16-XMODEM checksum. Preamble:
+    /// <c>"Stellar signed message:\n"</c>.</summary>
+    public const string Stellar = "xlm";
+
+    /// <summary>XRP (ed25519) — <c>m/44'/144'/0'/0'/N'</c> SLIP-0010
+    /// hardened path (Xumm / XRPL ed25519 convention); classic <c>r…</c>
+    /// Base58Check addresses (Ripple alphabet) with version byte 0x00,
+    /// AccountID = HASH160(0xED || pubkey32). Preamble:
+    /// <c>"XRP signed message:\n"</c>.</summary>
+    public const string Ripple = "xrp";
 }
